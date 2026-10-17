@@ -651,9 +651,7 @@ export default function Panel(): React.JSX.Element {
               text: ready ? t('welcome') : t('configureFirst')
             }
           ])
-          if (!ready) {
-            populateSettingsDraft(cfg)
-          } else if (payload.action === 'voice') {
+          if (ready && payload.action === 'voice') {
             void beginRecording()
           }
         })
@@ -1205,12 +1203,9 @@ export default function Panel(): React.JSX.Element {
         >
           <div className="settings-modal">
             <h2>{t('settings')}</h2>
-            {!settings?.hasApiKey && (
-              <p className="onboarding-hint">{t('onboardingHint')}</p>
-            )}
 
             <div className="settings-section">
-              <div className="settings-section-title">{t('connection')}</div>
+              <div className="settings-section-title">{t('modelConfig')}</div>
               <label>
                 <span>{t('baseUrl')}</span>
                 <input
@@ -1241,12 +1236,6 @@ export default function Panel(): React.JSX.Element {
                   </button>
                 </div>
               </label>
-            </div>
-
-            <div className="settings-divider" />
-
-            <div className="settings-section">
-              <div className="settings-section-title">{t('model')}</div>
               {draftSeparateModels ? (
                 <>
                   <label>
@@ -1254,7 +1243,7 @@ export default function Panel(): React.JSX.Element {
                     <input
                       value={draftTextModel}
                       onChange={(event) => setDraftTextModel(event.target.value)}
-                      placeholder="gpt-4o-mini / deepseek-chat"
+                      placeholder="gpt-4o-mini"
                     />
                   </label>
                   <label>
@@ -1262,12 +1251,13 @@ export default function Panel(): React.JSX.Element {
                     <input
                       value={draftVisionModel}
                       onChange={(event) => setDraftVisionModel(event.target.value)}
-                      placeholder="gpt-4o-mini / qwen-vl-plus"
+                      placeholder="qwen-vl-plus"
                     />
                   </label>
                 </>
               ) : (
                 <label>
+                  <span>{t('model')}</span>
                   <input
                     value={draftModel}
                     onChange={(event) => setDraftModel(event.target.value)}
@@ -1275,7 +1265,6 @@ export default function Panel(): React.JSX.Element {
                   />
                 </label>
               )}
-              <span className="field-hint">{t('multimodalHint')}</span>
               <button
                 type="button"
                 className="link-button"
@@ -1297,7 +1286,7 @@ export default function Panel(): React.JSX.Element {
             <div className="settings-divider" />
 
             <div className="settings-section">
-              <div className="settings-section-title">{t('voiceInput')}</div>
+              <div className="settings-section-title">{t('voiceModel')}</div>
               <div className="asr-row">
                 <span className={asrStatus?.installed ? 'asr-ok' : 'asr-missing'}>
                   {asrStatus?.downloading
@@ -1318,11 +1307,6 @@ export default function Panel(): React.JSX.Element {
                 </div>
               )}
               {asrStatus?.error && <div className="asr-error">{asrStatus.error}</div>}
-              {asrStatus?.modelDir && (
-                <div className="asr-path" title={asrStatus.modelDir}>
-                  {asrStatus.modelDir}
-                </div>
-              )}
               <div className="switch-row">
                 <span>{t('autoSend')}</span>
                 <button

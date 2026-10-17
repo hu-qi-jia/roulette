@@ -40,7 +40,6 @@ import type {
   ChatMessage,
   ChatRequest,
   HookEvent,
-  Rect,
   Sector,
   SessionKind,
   SettingsInput,
@@ -586,14 +585,6 @@ function finishSelection(result: Sector | 'cancel'): void {
   }, 280)
 }
 
-function virtualBoundsOf(displays: Display[]): Rect {
-  const left = Math.min(...displays.map((display) => display.bounds.x))
-  const top = Math.min(...displays.map((display) => display.bounds.y))
-  const right = Math.max(...displays.map((display) => display.bounds.x + display.bounds.width))
-  const bottom = Math.max(...displays.map((display) => display.bounds.y + display.bounds.height))
-  return { x: left, y: top, width: right - left, height: bottom - top }
-}
-
 function sendShotShow(payload: ShotShowPayload): void {
   if (!shot) return
   if (shot.webContents.isLoading()) {
@@ -740,8 +731,17 @@ async function startScreenshot(fromPanel: boolean): Promise<void> {
     // Let the compositor drop the wheel/panel before grabbing the screen.
     await delay(220)
 
-    const displays = screen.getAllDisplays()
-    const virtual = virtualBoundsOf(displays)
+    const point = screen.getCursorScreenPoint()
+    const display = screen.getDisplayNearestPoint(point)
+    const displays = [display]
+    const virtual = display.bounds
+    console.log(
+      '[shot] display',
+      display.id,
+      JSON.stringify(display.bounds),
+      'scale',
+      display.scaleFactor
+    )
     const captureStarted = Date.now()
     const captures =
       (await captureWithHook(displays)) ?? (await captureWithDesktopCapturer(displays))
@@ -1109,6 +1109,17 @@ function bootstrap(): void {
   shot = createShotWindow()
 
   configurePermissions()
+
+  console.log(
+    '[display]',
+    JSON.stringify(
+      screen.getAllDisplays().map((display) => ({
+        id: display.id,
+        bounds: display.bounds,
+        scale: display.scaleFactor
+      }))
+    )
+  )
 
   // Warm the screen-capture pipeline so the first screenshot opens faster.
   void desktopCapturer

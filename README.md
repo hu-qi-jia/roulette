@@ -8,7 +8,7 @@ Roulette is a resident desktop app: hold a mouse gesture to open a radial menu, 
 
 M2–M4 done: wheel overlay, hold + click selection, panel, settings, the OpenAI-compatible streaming engine, cursor insertion, persistent history, screenshot capture, and offline voice input. Packaging is next.
 
-Pick 截图 on the wheel to freeze the desktop, drag a region, and the crop opens in a new session; screenshots are attached to the turn, use the configured vision model, and stay available to follow-up turns. The composer's camera button captures into the current session instead.
+Pick 截图 on the wheel to freeze the display under the cursor, drag a region, and the crop opens in a new session; screenshots are attached to the turn, use the configured vision model, and stay available to follow-up turns. The composer's camera button captures into the current session instead.
 
 Pick 语音 (or press the mic in the composer) and the panel records from the microphone. Stopping sends the audio to the local SenseVoice model and puts the transcript in the input, where it can be edited before sending; Settings has an "auto-send" switch. The speech model (~228 MB) is downloaded on first use from Settings and never sends audio off the machine. See [ADR 0007](docs/adr/0007-local-asr-with-sherpa-onnx.md).
 

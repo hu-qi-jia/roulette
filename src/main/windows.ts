@@ -50,8 +50,8 @@ export function createOverlayWindow(): BrowserWindow {
 
 export function createPanelWindow(): BrowserWindow {
   const win = new BrowserWindow({
-    width: 560,
-    height: 660,
+    width: 480,
+    height: 640,
     minWidth: 420,
     minHeight: 420,
     show: false,
