@@ -1,0 +1,8 @@
+node_modules/
+out/
+dist/
+native/mouse-hook/target/
+spike/node_modules/
+spike/hook/target/
+*.log
+.env

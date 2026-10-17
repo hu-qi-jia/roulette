@@ -1,0 +1,14 @@
+{
+  "name": "roulette-spike",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Feasibility spike: global mouse hook + radial selection",
+  "main": "main.js",
+  "scripts": {
+    "build:hook": "cargo build --release --manifest-path hook/Cargo.toml",
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^44.8.0"
+  }
+}

@@ -1,0 +1,1282 @@
+import {
+  app,
+  BrowserWindow,
+  clipboard,
+  desktopCapturer,
+  globalShortcut,
+  ipcMain,
+  screen,
+  session,
+  type Display,
+  type WebContents
+} from 'electron'
+import crypto from 'node:crypto'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { HookClient } from './hook-client'
+import { downloadModel, getAsrStatus, transcribe } from './asr'
+import { streamChat } from './engine'
+import { getApiKey, getPublicSettings, saveSettings } from './settings'
+import {
+  appendMessage,
+  closeStore,
+  deleteSession,
+  ensureSession,
+  getMessages,
+  getSession,
+  listSessions,
+  openStore,
+  renameSession
+} from './store'
+import {
+  createOverlayWindow,
+  createPanelWindow,
+  createShotWindow,
+  OVERLAY_SIZE,
+  setOverlayInteractive
+} from './windows'
+import type {
+  ChatMessage,
+  ChatRequest,
+  HookEvent,
+  Rect,
+  Sector,
+  SessionKind,
+  SettingsInput,
+  ShotCompletePayload,
+  ShotDisplay,
+  ShotShowPayload,
+  TranscribeRequest,
+  WheelMode
+} from '../shared/types'
+
+const DEAD_ZONE = 76
+const CLICK_SHORTCUTS = ['Control+Shift+Space', 'Alt+Shift+Space', 'Control+Alt+R']
+const HISTORY_SHORTCUTS = ['Control+Alt+H', 'Alt+Shift+H']
+const SHOT_ESCAPE = 'Escape'
+
+// Dev-only: feed a WAV file to getUserMedia so the voice flow can be tested
+// on machines without a microphone.
+if (process.env.ROULETTE_TEST_MIC_WAV) {
+  app.commandLine.appendSwitch('use-fake-device-for-media-stream')
+  app.commandLine.appendSwitch(
+    'use-file-for-fake-audio-capture',
+    process.env.ROULETTE_TEST_MIC_WAV
+  )
+}
+const KIND_BY_SECTOR: Record<Sector, SessionKind> = {
+  text: 'chat',
+  screenshot: 'screenshot',
+  voice: 'voice',
+  history: 'chat'
+}
+
+let overlay: BrowserWindow | null = null
+let panel: BrowserWindow | null = null
+let shot: BrowserWindow | null = null
+const hook = new HookClient()
+
+let active = false
+let mode: WheelMode = 'hold'
+let center = { x: 0, y: 0 }
+let wheelOrigin = { x: 0, y: 0 }
+let hideTimer: NodeJS.Timeout | null = null
+let targetHwnd = 0
+let shotActive = false
+let shotFromPanel = false
+let pendingShot: ShotShowPayload | null = null
+const activeChats = new Map<string, AbortController>()
+
+function toDip(x: number, y: number): { x: number; y: number } {
+  if (typeof screen.screenToDipPoint === 'function') {
+    try {
+      const p = screen.screenToDipPoint({ x, y })
+      return { x: p.x, y: p.y }
+    } catch {
+      // Fall back to the display scale factor below.
+    }
+  }
+  const display = screen.getDisplayNearestPoint({ x, y })
+  const scale = display.scaleFactor || 1
+  return { x: x / scale, y: y / scale }
+}
+
+function hookPath(): string {
+  const name = process.platform === 'win32' ? 'roulette-hook.exe' : 'roulette-hook'
+  const base = app.isPackaged
+    ? path.join(process.resourcesPath, 'native')
+    : path.join(app.getAppPath(), 'native', 'mouse-hook', 'target', 'release')
+  return path.join(base, name)
+}
+
+function sectorForAngle(angle: number): Sector {
+  // 0° = right, 90° = down, 180° = left, 270° = up.
+  if (angle >= 225 && angle < 315) return 'text'
+  if (angle >= 135 && angle < 225) return 'screenshot'
+  if (angle >= 45 && angle < 135) return 'history'
+  return 'voice'
+}
+
+function sendToOverlay(channel: string, payload?: unknown): void {
+  if (!overlay || overlay.webContents.isLoading()) return
+  overlay.webContents.send(channel, payload)
+}
+
+function sendToPanel(channel: string, payload?: unknown): void {
+  if (!panel || panel.webContents.isLoading()) return
+  panel.webContents.send(channel, payload)
+}
+
+function emitChatError(
+  sessionId: string,
+  message: string,
+  code?: 'no-key' | 'no-base-url' | 'no-model' | 'no-vision-model' | 'image-unreadable' | 'auth' | 'rate-limit' | 'server' | 'network' | 'http' | 'unknown'
+): void {
+  sendToPanel('chat:error', { sessionId, message, code })
+}
+
+function classifyEngineError(error: unknown): 'auth' | 'rate-limit' | 'server' | 'network' | 'http' | 'unknown' {
+  const message = error instanceof Error ? error.message : String(error)
+  if (/HTTP 401|HTTP 403/i.test(message)) return 'auth'
+  if (/HTTP 429/i.test(message)) return 'rate-limit'
+  if (/HTTP 5\d\d/i.test(message)) return 'server'
+  if (/HTTP \d+/i.test(message)) return 'http'
+  if (/fetch failed|network|ECONN|ENOTFOUND|ETIMEDOUT|timeout/i.test(message)) return 'network'
+  return 'unknown'
+}
+
+const MAX_IMAGE_DATA_URL = 24 * 1024 * 1024
+
+/** Persists a capture and returns its path. Images never leave the machine
+ *  except as part of a request to the configured provider. */
+function saveImage(dataUrl: string): string | null {
+  if (dataUrl.length > MAX_IMAGE_DATA_URL) return null
+  const match = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl)
+  if (!match) return null
+
+  const ext = match[1] === 'jpeg' ? 'jpg' : match[1]
+  try {
+    const dir = path.join(app.getPath('userData'), 'images')
+    fs.mkdirSync(dir, { recursive: true })
+    const file = path.join(dir, `${Date.now()}-${crypto.randomUUID()}.${ext}`)
+    fs.writeFileSync(file, Buffer.from(match[2], 'base64'))
+    return file
+  } catch (error) {
+    console.warn('[image] save failed', error)
+    return null
+  }
+}
+
+function readImageDataUrl(file: string): string | null {
+  try {
+    const ext = path.extname(file).slice(1).toLowerCase()
+    const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg'
+    return `data:${mime};base64,${fs.readFileSync(file).toString('base64')}`
+  } catch {
+    return null
+  }
+}
+
+function storedHistory(sessionId: string): ChatMessage[] {
+  return getMessages(sessionId).map((message) => {
+    const image = message.imagePath ? readImageDataUrl(message.imagePath) : null
+    return {
+      role: message.role,
+      content: message.content,
+      images: image ? [image] : undefined
+    }
+  })
+}
+
+async function handleChat(request: ChatRequest): Promise<void> {
+  const settings = getPublicSettings()
+  const apiKey = getApiKey()
+
+  if (!apiKey) {
+    emitChatError(request.sessionId, 'API key is not configured.', 'no-key')
+    return
+  }
+  if (!settings.baseUrl) {
+    emitChatError(request.sessionId, 'Base URL is not configured.', 'no-base-url')
+    return
+  }
+
+  const text = String(request.text ?? '').trim()
+  if (!text) return
+
+  // A screenshot session keeps using the vision model for follow-up turns,
+  // because the earlier turn still carries its image.
+  const existing = storedHistory(request.sessionId)
+  const needsVision = Boolean(request.image) || existing.some((m) => m.images?.length)
+  const model = needsVision ? settings.visionModel : settings.textModel
+  if (!model) {
+    emitChatError(
+      request.sessionId,
+      needsVision ? 'Vision model is not configured.' : 'Text model is not configured.',
+      needsVision ? 'no-vision-model' : 'no-model'
+    )
+    return
+  }
+
+  let imagePath: string | null = null
+  if (request.image) {
+    imagePath = saveImage(request.image)
+    if (!imagePath) {
+      emitChatError(request.sessionId, 'The attached image could not be read.', 'image-unreadable')
+      return
+    }
+  }
+
+  ensureSession({
+    id: request.sessionId,
+    kind: request.kind,
+    appName: request.appName ?? null
+  })
+  appendMessage(request.sessionId, 'user', text, imagePath)
+  // The store is the single source of truth for the conversation, so a resumed
+  // session can continue with its full history.
+  const history = storedHistory(request.sessionId)
+
+  activeChats.get(request.sessionId)?.abort()
+  const controller = new AbortController()
+  activeChats.set(request.sessionId, controller)
+  let received = 0
+  let output = ''
+
+  try {
+    console.log('[chat] start', request.sessionId, 'turns:', history.length, 'model:', model)
+    for await (const delta of streamChat(
+      { baseUrl: settings.baseUrl, apiKey, model },
+      history,
+      controller.signal
+    )) {
+      received += delta.length
+      output += delta
+      sendToPanel('chat:delta', { sessionId: request.sessionId, delta })
+    }
+    console.log('[chat] done', request.sessionId, 'chars:', received)
+    sendToPanel('chat:done', { sessionId: request.sessionId })
+    if (panel) captureIfRequested(panel, 'out/chat-capture.png')
+    if (process.env.ROULETTE_TEST_INSERT === '1' && output) {
+      void insertText(output)
+    }
+  } catch (error) {
+    console.warn('[chat] error', error)
+    if (panel) captureIfRequested(panel, 'out/chat-error-capture.png')
+    if (controller.signal.aborted) {
+      sendToPanel('chat:done', { sessionId: request.sessionId })
+    } else {
+      emitChatError(
+        request.sessionId,
+        error instanceof Error ? error.message : String(error),
+        classifyEngineError(error)
+      )
+    }
+  } finally {
+    // A newer request for the same session already replaced this one; its
+    // partial output must not land after the newer user message.
+    const active = activeChats.get(request.sessionId)
+    const superseded = active !== undefined && active !== controller
+    if (active === controller) activeChats.delete(request.sessionId)
+    // Keep partial output on cancellation so a resumed session stays coherent.
+    if (output.trim() && !superseded) {
+      appendMessage(request.sessionId, 'assistant', output.trim())
+    }
+  }
+}
+
+// Electron 44's async clipboard API refuses to write ClipboardItems returned by
+// clipboard.read(), so v1 snapshots and restores plain text only.
+async function snapshotClipboard(): Promise<string> {
+  try {
+    return await clipboard.readText()
+  } catch {
+    return ''
+  }
+}
+
+async function restoreClipboard(text: string): Promise<void> {
+  try {
+    // If the clipboard was empty before, leave the inserted text in place:
+    // clearing it risks racing a slow paste and gives the user nothing to re-paste.
+    if (text) await clipboard.writeText(text)
+  } catch (error) {
+    console.warn('[insert] clipboard restore failed', error)
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function windowHandle(win: BrowserWindow | null): number {
+  if (!win) return 0
+  try {
+    const buffer = win.getNativeWindowHandle()
+    return buffer.length >= 8 ? Number(buffer.readBigUInt64LE(0)) : buffer.readUInt32LE(0)
+  } catch {
+    return 0
+  }
+}
+
+function isOurWindow(hwnd: number): boolean {
+  if (!hwnd) return false
+  return [panel, overlay, shot].some((win) => windowHandle(win) === hwnd)
+}
+
+const DESKTOP_CLASSES = new Set([
+  'Progman',
+  'WorkerW',
+  'Shell_TrayWnd',
+  'Windows.UI.Core.CoreWindow'
+])
+
+async function queryForeground(
+  timeoutMs = 700
+): Promise<{ hwnd: number; className: string } | null> {
+  if (!hook.isRunning()) return null
+  const waiter = hook.waitFor((event) => event.type === 'foreground-query', timeoutMs)
+  if (!hook.send('query-foreground')) {
+    void waiter.catch(() => {})
+    return null
+  }
+  try {
+    const event = await waiter
+    if (event.type === 'foreground-query') {
+      return { hwnd: event.hwnd, className: event.class ?? '' }
+    }
+  } catch {
+    // The query timed out; fall back to the locked target.
+  }
+  return null
+}
+
+async function insertText(text: string): Promise<void> {
+  if (!text.trim()) return
+  console.log('[insert] start target:', targetHwnd, 'hook:', hook.isRunning(), 'chars:', text.length)
+
+  try {
+    if (!hook.isRunning()) {
+      console.warn('[insert] hook is not running; copying instead')
+      await clipboard.writeText(text)
+      panel?.show()
+      sendToPanel('insert:failed')
+      return
+    }
+
+    const snapshot = await snapshotClipboard()
+    console.log('[insert] snapshot chars:', snapshot.length)
+    await clipboard.writeText(text)
+    console.log('[insert] clipboard written')
+
+    panel?.hide()
+    // Give the OS time to hand the foreground and keyboard focus back to the
+    // previous app before any keystrokes are injected.
+    await delay(1500)
+
+    // Prefer the window that is foreground right now over the window that was
+    // under the cursor when the wheel opened: the user may have switched apps.
+    let pasteTarget = targetHwnd
+    const foreground = await queryForeground(700)
+    if (
+      foreground &&
+      foreground.hwnd &&
+      !isOurWindow(foreground.hwnd) &&
+      !DESKTOP_CLASSES.has(foreground.className)
+    ) {
+      pasteTarget = foreground.hwnd
+    }
+    console.log('[insert] target:', pasteTarget, 'foreground:', foreground)
+
+    const command =
+      process.env.ROULETTE_TEST_WMPASTE === '1'
+        ? `wmpaste ${pasteTarget}`
+        : `paste ${pasteTarget} ${Math.round(wheelOrigin.x)} ${Math.round(wheelOrigin.y)}`
+    const resultPromise = hook.waitFor((event) => event.type === 'paste-result', 5000)
+    const sent = hook.send(command)
+    console.log('[insert] command sent:', command, sent)
+    if (!sent) {
+      await clipboard.writeText(text)
+      panel?.show()
+      sendToPanel('insert:failed')
+      return
+    }
+
+    const result = await resultPromise.catch((error) => {
+      console.warn('[insert] no paste result', error)
+      return null
+    })
+    console.log('[insert] result', result)
+
+    if (!result || result.type !== 'paste-result' || !result.ok) {
+      // Keep the text on the clipboard and tell the user to paste manually.
+      await clipboard.writeText(text)
+      panel?.show()
+      sendToPanel('insert:failed')
+      return
+    }
+
+    await delay(250)
+    await restoreClipboard(snapshot)
+    console.log('[insert] pasted', text.length, 'chars to', pasteTarget)
+
+    if (process.env.ROULETTE_TEST_SIDEKEY === '1') {
+      const keySent = hook.send('key')
+      console.log('[test] side key sent:', keySent)
+    }
+  } catch (error) {
+    console.error('[insert] failed', error)
+    await clipboard.writeText(text).catch(() => {})
+    panel?.show()
+    sendToPanel('insert:failed')
+  }
+}
+
+function captureIfRequested(win: BrowserWindow, name: string): void {
+  if (process.env.ROULETTE_CAPTURE !== '1') return
+  setTimeout(() => {
+    win.webContents
+      .capturePage()
+      .then((image) => fs.writeFileSync(path.join(app.getAppPath(), name), image.toPNG()))
+      .catch((error) => console.warn('[capture]', error))
+  }, 500)
+}
+
+function maybeRunTestMessage(): void {
+  const text = process.env.ROULETTE_TEST_MESSAGE
+  if (!text || !panel) return
+  setTimeout(() => {
+    if (!panel) return
+    const script = `(() => {
+      const el = document.querySelector('textarea');
+      if (!(el instanceof HTMLTextAreaElement)) return 'no-textarea';
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+      setter.call(el, ${JSON.stringify(text)});
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.focus();
+      setTimeout(() => {
+        el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      }, 120);
+      return 'queued';
+    })()`
+    panel.webContents
+      .executeJavaScript(script)
+      .then((result) => console.log('[test]', result))
+      .catch((error) => console.warn('[test]', error))
+  }, 900)
+}
+
+// Dev-only: opens the history drawer, resumes the first entry, and reports what
+// the panel rendered. Relies on the panel's DOM structure; not shipped UI code.
+function maybeRunHistoryTest(): void {
+  if (process.env.ROULETTE_TEST_HISTORY !== '1' || !panel) return
+  setTimeout(() => {
+    if (!panel) return
+    const followup = process.env.ROULETTE_TEST_FOLLOWUP ?? ''
+    const script = `(async () => {
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      document.querySelector('.history-button')?.click();
+      await wait(500);
+      const items = document.querySelectorAll('.history-item');
+      const listCount = items.length;
+      items[0]?.click();
+      await wait(500);
+      const resumed = {
+        renderedMessages: document.querySelectorAll('.message').length,
+        title: document.querySelector('.session-title')?.textContent ?? '',
+        bubble: document.querySelector('.message.user .bubble')?.textContent ?? ''
+      };
+      const followup = ${JSON.stringify(followup)};
+      if (followup) {
+        const el = document.querySelector('textarea');
+        if (el instanceof HTMLTextAreaElement) {
+          const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+          setter.call(el, followup);
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.focus();
+          await wait(120);
+          el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+          await wait(1800);
+        }
+      }
+      return {
+        listCount,
+        resumed,
+        afterFollowup: document.querySelectorAll('.message').length
+      };
+    })()`
+    panel.webContents
+      .executeJavaScript(script)
+      .then((result) => console.log('[test] history', JSON.stringify(result)))
+      .catch((error) => console.warn('[test] history', error))
+  }, 3500)
+}
+
+function showWheel(nextMode: WheelMode, at: { x: number; y: number }): void {
+  if (!overlay) return
+  if (panel?.isVisible()) {
+    panel.focus()
+    return
+  }
+
+  active = true
+  mode = nextMode
+  center = at
+  try {
+    wheelOrigin = screen.dipToScreenPoint({ x: at.x, y: at.y })
+  } catch {
+    wheelOrigin = { x: at.x, y: at.y }
+  }
+
+  if (hideTimer) {
+    clearTimeout(hideTimer)
+    hideTimer = null
+  }
+
+  overlay.setBounds({
+    x: Math.round(at.x - OVERLAY_SIZE / 2),
+    y: Math.round(at.y - OVERLAY_SIZE / 2),
+    width: OVERLAY_SIZE,
+    height: OVERLAY_SIZE
+  })
+  setOverlayInteractive(overlay, nextMode)
+  if (nextMode === 'click') {
+    // Ask for the target before the overlay takes the foreground, then show
+    // the window a beat later so the query wins the race.
+    hook.send('foreground')
+    setTimeout(() => {
+      if (active && overlay) overlay.show()
+    }, 80)
+  } else {
+    overlay.showInactive()
+  }
+
+  sendToOverlay('wheel:show', {
+    mode: nextMode,
+    size: OVERLAY_SIZE,
+    deadZone: DEAD_ZONE
+  })
+  captureIfRequested(overlay, 'out/overlay-capture.png')
+}
+
+function hideWheel(): void {
+  active = false
+  if (!overlay) return
+  overlay.hide()
+  overlay.setIgnoreMouseEvents(true, { forward: true })
+  overlay.setFocusable(false)
+}
+
+function finishSelection(result: Sector | 'cancel'): void {
+  if (!active) return
+  active = false
+  console.log('[wheel]', result)
+  if (result === 'screenshot') {
+    // Skip the result animation; capture as soon as the overlay is hidden.
+    hideWheel()
+    void startScreenshot(false)
+    return
+  }
+  sendToOverlay('wheel:result', result)
+  hideTimer = setTimeout(() => {
+    hideWheel()
+    if (result === 'history') openPanel('text', { openHistory: true })
+    else if (result !== 'cancel') openPanel(result)
+  }, 280)
+}
+
+function virtualBoundsOf(displays: Display[]): Rect {
+  const left = Math.min(...displays.map((display) => display.bounds.x))
+  const top = Math.min(...displays.map((display) => display.bounds.y))
+  const right = Math.max(...displays.map((display) => display.bounds.x + display.bounds.width))
+  const bottom = Math.max(...displays.map((display) => display.bounds.y + display.bounds.height))
+  return { x: left, y: top, width: right - left, height: bottom - top }
+}
+
+function sendShotShow(payload: ShotShowPayload): void {
+  if (!shot) return
+  if (shot.webContents.isLoading()) {
+    pendingShot = payload
+    return
+  }
+  shot.webContents.send('shot:show', payload)
+}
+
+async function captureWithHook(displays: Display[]): Promise<ShotDisplay[] | null> {
+  if (!hook.isRunning()) return null
+  const outDir = path.join(os.tmpdir(), 'roulette-captures')
+  try {
+    fs.rmSync(outDir, { recursive: true, force: true })
+    fs.mkdirSync(outDir, { recursive: true })
+  } catch (error) {
+    console.warn('[shot] cannot prepare capture dir', error)
+    return null
+  }
+
+  const items = displays.map((display) => {
+    const topLeft = screen.dipToScreenPoint({
+      x: display.bounds.x,
+      y: display.bounds.y
+    })
+    const bottomRight = screen.dipToScreenPoint({
+      x: display.bounds.x + display.bounds.width,
+      y: display.bounds.y + display.bounds.height
+    })
+    return {
+      display,
+      rect: {
+        x: Math.round(topLeft.x),
+        y: Math.round(topLeft.y),
+        width: Math.round(bottomRight.x - topLeft.x),
+        height: Math.round(bottomRight.y - topLeft.y)
+      },
+      file: path.join(outDir, `${display.id}.bmp`)
+    }
+  })
+
+  const command = `capture ${items.length} ${items
+    .map(
+      (item) =>
+        `${item.display.id} ${item.rect.x} ${item.rect.y} ${item.rect.width} ${item.rect.height}`
+    )
+    .join(' ')}`
+  const resultPromise = hook.waitFor((event) => event.type === 'capture-result', 6000)
+  const started = Date.now()
+  if (!hook.send(command)) {
+    void resultPromise.catch(() => {})
+    try {
+      fs.rmSync(outDir, { recursive: true, force: true })
+    } catch {}
+    return null
+  }
+
+  try {
+    const result = await resultPromise
+    if (result.type !== 'capture-result' || !result.ok) {
+      console.warn('[shot] GDI capture failed', result)
+      return null
+    }
+
+    const captures: ShotDisplay[] = []
+    for (const item of items) {
+      if (!fs.existsSync(item.file)) return null
+      const bytes = fs.readFileSync(item.file)
+      if (bytes.length === 0) return null
+      captures.push({
+        id: item.display.id,
+        bounds: item.display.bounds,
+        scaleFactor: item.display.scaleFactor,
+        image: new Uint8Array(bytes),
+        imageMime: 'image/bmp',
+        imageSize: { width: item.rect.width, height: item.rect.height }
+      })
+    }
+    console.log('[shot] GDI capture in', Date.now() - started, 'ms')
+    return captures
+  } catch (error) {
+    console.warn('[shot] GDI capture failed', error)
+    return null
+  } finally {
+    try {
+      fs.rmSync(outDir, { recursive: true, force: true })
+    } catch {}
+  }
+}
+
+async function captureWithDesktopCapturer(displays: Display[]): Promise<ShotDisplay[]> {
+  const maxWidth = Math.max(
+    ...displays.map((display) => Math.round(display.bounds.width * display.scaleFactor))
+  )
+  const maxHeight = Math.max(
+    ...displays.map((display) => Math.round(display.bounds.height * display.scaleFactor))
+  )
+
+  const sourcesStarted = Date.now()
+  const sources = await desktopCapturer.getSources({
+    types: ['screen'],
+    thumbnailSize: { width: maxWidth, height: maxHeight },
+    fetchWindowIcons: false
+  })
+  console.log('[shot] sources in', Date.now() - sourcesStarted, 'ms')
+
+  const encodeStarted = Date.now()
+  const captures = displays
+    .map((display, index): ShotDisplay | null => {
+      const source =
+        sources.find((item) => item.display_id === String(display.id)) ??
+        sources[index] ??
+        sources[0]
+      const image = source?.thumbnail
+      if (!image || image.isEmpty()) return null
+      // JPEG at 90 keeps the frozen overlay light: the crop is exported as
+      // JPEG anyway, and a multi-megabyte PNG data URL adds latency.
+      const encoded = image.toJPEG(90)
+      if (!encoded || encoded.length === 0) return null
+      return {
+        id: display.id,
+        bounds: display.bounds,
+        scaleFactor: display.scaleFactor,
+        image: new Uint8Array(encoded),
+        imageMime: 'image/jpeg',
+        imageSize: image.getSize()
+      }
+    })
+    .filter((item): item is ShotDisplay => item !== null)
+
+  console.log('[shot] encoded in', Date.now() - encodeStarted, 'ms')
+  return captures
+}
+
+async function startScreenshot(fromPanel: boolean): Promise<void> {
+  if (!shot || shotActive) return
+  shotActive = true
+  shotFromPanel = fromPanel
+  const startedAt = Date.now()
+
+  try {
+    if (fromPanel) panel?.hide()
+    hideWheel()
+    // Let the compositor drop the wheel/panel before grabbing the screen.
+    await delay(220)
+
+    const displays = screen.getAllDisplays()
+    const virtual = virtualBoundsOf(displays)
+    const captureStarted = Date.now()
+    const captures =
+      (await captureWithHook(displays)) ?? (await captureWithDesktopCapturer(displays))
+    console.log('[shot] captured in', Date.now() - captureStarted, 'ms')
+
+    if (captures.length === 0) throw new Error('No screen source returned an image.')
+
+    shot.setBounds(virtual)
+    shot.show()
+    shot.focus()
+    // If another always-on-top window steals focus, the renderer never sees
+    // Escape; a temporary global shortcut keeps cancel working regardless.
+    if (!globalShortcut.isRegistered(SHOT_ESCAPE)) {
+      console.log(
+        '[shot] global escape registered:',
+        globalShortcut.register(SHOT_ESCAPE, () => cancelShot())
+      )
+    }
+    sendShotShow({ virtual, displays: captures })
+    console.log(
+      '[shot] ready',
+      virtual.width,
+      'x',
+      virtual.height,
+      'displays:',
+      captures.length,
+      'focused:',
+      BrowserWindow.getFocusedWindow() === shot,
+      'in',
+      Date.now() - startedAt,
+      'ms'
+    )
+  } catch (error) {
+    console.error('[shot] capture failed', error)
+    shotActive = false
+    shotFromPanel = false
+    if (globalShortcut.isRegistered(SHOT_ESCAPE)) globalShortcut.unregister(SHOT_ESCAPE)
+    if (fromPanel) {
+      panel?.show()
+      panel?.focus()
+    }
+  }
+}
+
+function finishShot(payload: ShotCompletePayload): void {
+  if (!shotActive) return
+  shotActive = false
+  shot?.hide()
+  if (globalShortcut.isRegistered(SHOT_ESCAPE)) globalShortcut.unregister(SHOT_ESCAPE)
+
+  const fromPanel = shotFromPanel
+  shotFromPanel = false
+
+  if (!payload.image || !payload.image.startsWith('data:image/')) return
+
+  console.log('[shot] selected', payload.width, 'x', payload.height, 'fromPanel:', fromPanel)
+
+  if (fromPanel) {
+    panel?.show()
+    panel?.focus()
+    sendToPanel('panel:attach', { image: payload.image })
+    if (panel) captureIfRequested(panel, 'out/panel-attach-capture.png')
+    return
+  }
+  openPanel('screenshot', { image: payload.image })
+}
+
+function cancelShot(): void {
+  if (!shotActive) return
+  shotActive = false
+  shot?.hide()
+  if (globalShortcut.isRegistered(SHOT_ESCAPE)) globalShortcut.unregister(SHOT_ESCAPE)
+  console.log('[shot] cancelled')
+  if (shotFromPanel) {
+    shotFromPanel = false
+    panel?.show()
+    panel?.focus()
+  }
+}
+
+function openPanel(
+  action: Sector,
+  extra: { image?: string; openHistory?: boolean } = {}
+): void {
+  if (!panel) return
+  panel.show()
+  panel.focus()
+  if (!panel.webContents.isLoading()) {
+    panel.webContents.send('panel:open', {
+      action,
+      kind: KIND_BY_SECTOR[action],
+      image: extra.image,
+      openHistory: extra.openHistory
+    })
+  }
+  captureIfRequested(panel, 'out/panel-capture.png')
+  maybeRunTestMessage()
+  maybeRunHistoryTest()
+  maybeRunPanelShotTest()
+  maybeStopTestRecording(action)
+  maybeRunSettingsTest()
+  maybeRunAsrDownloadTest()
+  maybeRunHistoryOpenTest()
+  maybeRunHistoryActionsTest()
+}
+
+// Dev-only: opens the history drawer without resuming anything.
+function maybeRunHistoryOpenTest(): void {
+  if (process.env.ROULETTE_TEST_HISTORY_OPEN !== '1' || !panel) return
+  setTimeout(() => {
+    panel?.webContents
+      .executeJavaScript(
+        `(() => {
+          const button = document.querySelector('.history-button');
+          if (!(button instanceof HTMLButtonElement)) return 'no-button';
+          button.click();
+          return 'clicked';
+        })()`
+      )
+      .then((result) => console.log('[test] history open', result))
+      .catch((error) => console.warn('[test] history open', error))
+    setTimeout(() => {
+      if (panel) captureIfRequested(panel, 'out/history-capture.png')
+    }, 700)
+  }, 1500)
+}
+
+// Dev-only: exercises search, filtering, rename, delete, and undo in the drawer.
+function maybeRunHistoryActionsTest(): void {
+  if (process.env.ROULETTE_TEST_HISTORY_ACTIONS !== '1' || !panel) return
+  setTimeout(() => {
+    const script = `(async () => {
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const setValue = (el, value) => {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+        setter.call(el, value);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+      const result = {};
+      document.querySelector('.history-button')?.click();
+      await wait(500);
+      result.total = document.querySelectorAll('.history-item').length;
+
+      const search = document.querySelector('.history-search input');
+      if (search instanceof HTMLInputElement) {
+        setValue(search, 'CAP');
+        await wait(350);
+        result.search = document.querySelectorAll('.history-item').length;
+        setValue(search, '');
+        await wait(350);
+      }
+
+      const chips = [...document.querySelectorAll('.filter-chip')];
+      chips[2]?.click();
+      await wait(350);
+      result.shot = document.querySelectorAll('.history-item').length;
+      chips[0]?.click();
+      await wait(350);
+
+      const firstRename = document.querySelector('.history-item .history-rename');
+      firstRename?.click();
+      await wait(250);
+      const input = document.querySelector('.history-rename-input');
+      if (input instanceof HTMLInputElement) {
+        setValue(input, 'Renamed by test');
+        await wait(150);
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        await wait(600);
+      }
+      result.renamed = document.querySelector('.history-item-title')?.textContent ?? null;
+
+      result.beforeDelete = document.querySelectorAll('.history-item').length;
+      document.querySelector('.history-item .history-delete')?.click();
+      await wait(350);
+      result.afterDelete = document.querySelectorAll('.history-item').length;
+      document.querySelector('.undo-button')?.click();
+      await wait(650);
+      result.afterUndo = document.querySelectorAll('.history-item').length;
+      return result;
+    })()`
+    panel?.webContents
+      .executeJavaScript(script)
+      .then((result) => console.log('[test] history actions', JSON.stringify(result)))
+      .catch((error) => console.warn('[test] history actions', error))
+  }, 1500)
+}
+
+// Dev-only: opens the settings panel so the voice section can be inspected.
+function maybeRunSettingsTest(): void {
+  if (process.env.ROULETTE_TEST_SETTINGS !== '1' || !panel) return
+  setTimeout(() => {
+    panel?.webContents
+      .executeJavaScript(
+        `(async () => {
+          const button = document.querySelector('.settings-button');
+          if (!(button instanceof HTMLButtonElement)) return 'no-button';
+          button.click();
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          const save = document.querySelector('.settings-modal .primary');
+          return {
+            clicked: true,
+            saveDisabled: save instanceof HTMLButtonElement ? save.disabled : null
+          };
+        })()`
+      )
+      .then((result) => console.log('[test] settings', JSON.stringify(result)))
+      .catch((error) => console.warn('[test] settings', error))
+    if (process.env.ROULETTE_TEST_SETTINGS_EYE === '1') {
+      setTimeout(() => {
+        panel?.webContents
+          .executeJavaScript(
+            `(() => {
+              const button = document.querySelector('.input-action');
+              if (!(button instanceof HTMLButtonElement)) return 'no-eye';
+              button.click();
+              return 'revealed';
+            })()`
+          )
+          .then((result) => console.log('[test] settings eye', result))
+          .catch((error) => console.warn('[test] settings eye', error))
+      }, 350)
+    }
+    if (process.env.ROULETTE_TEST_SETTINGS_SAVE === '1') {
+      setTimeout(() => {
+        panel?.webContents
+          .executeJavaScript(
+            `(async () => {
+              const toggle = document.querySelector('.switch');
+              if (toggle instanceof HTMLButtonElement) toggle.click();
+              await new Promise((resolve) => setTimeout(resolve, 200));
+              const save = document.querySelector('.settings-modal .primary');
+              if (save instanceof HTMLButtonElement) save.click();
+              return 'saved';
+            })()`
+          )
+          .then((result) => console.log('[test] settings save', result))
+          .catch((error) => console.warn('[test] settings save', error))
+      }, 500)
+    }
+    setTimeout(() => {
+      if (panel) captureIfRequested(panel, 'out/settings-capture.png')
+    }, 900)
+  }, 2000)
+}
+
+// Dev-only: exercises the model downloader through the renderer IPC.
+function maybeRunAsrDownloadTest(): void {
+  if (process.env.ROULETTE_TEST_ASR_DOWNLOAD !== '1' || !panel) return
+  setTimeout(() => {
+    panel?.webContents
+      .executeJavaScript(
+        `window.roulette.downloadAsrModel().then((status) => ({
+          installed: status.installed,
+          downloading: status.downloading,
+          error: status.error ?? null,
+          received: status.receivedBytes,
+          total: status.totalBytes
+        }))`
+      )
+      .then((result) => console.log('[test] asr download', JSON.stringify(result)))
+      .catch((error) => console.warn('[test] asr download', error))
+  }, 1500)
+}
+
+function maybeStopTestRecording(action: Sector): void {
+  if (action !== 'voice') return
+  const ms = Number(process.env.ROULETTE_TEST_ASR_STOP_MS)
+  if (!Number.isFinite(ms) || ms <= 0) return
+  setTimeout(() => {
+    sendToPanel('test:stop-recording')
+  }, ms)
+  setTimeout(() => {
+    if (panel) captureIfRequested(panel, 'out/asr-capture.png')
+  }, ms + 4500)
+}
+
+// Dev-only: clicks the composer's camera button so the panel capture flow can
+// be exercised without locating the window on screen.
+function maybeRunPanelShotTest(): void {
+  if (process.env.ROULETTE_TEST_PANEL_SHOT !== '1' || !panel) return
+  setTimeout(() => {
+    panel?.webContents
+      .executeJavaScript(
+        `(() => {
+          const button = document.querySelector('.composer-tools .tool');
+          if (!(button instanceof HTMLButtonElement)) return 'no-button';
+          button.click();
+          return 'clicked';
+        })()`
+      )
+      .then((result) => console.log('[test] panel shot', result))
+      .catch((error) => console.warn('[test] panel shot', error))
+  }, 2000)
+}
+
+function onHookEvent(ev: HookEvent): void {
+  switch (ev.type) {
+    case 'ready':
+      console.log('[hook] ready')
+      break
+
+    case 'down':
+      targetHwnd = ev.hwnd
+      console.log('[hook] down hwnd:', ev.hwnd)
+      if (!active) showWheel('hold', toDip(ev.x, ev.y))
+      break
+
+    case 'foreground':
+      targetHwnd = ev.hwnd
+      break
+
+    case 'move': {
+      if (!active || mode !== 'hold') break
+      const p = toDip(ev.x, ev.y)
+      const dx = p.x - center.x
+      const dy = p.y - center.y
+      sendToOverlay('wheel:move', {
+        angle: ((Math.atan2(dy, dx) * 180) / Math.PI + 360) % 360,
+        distance: Math.hypot(dx, dy)
+      })
+      break
+    }
+
+    case 'up': {
+      if (!active || mode !== 'hold') break
+      const p = toDip(ev.x, ev.y)
+      const dx = p.x - center.x
+      const dy = p.y - center.y
+      const distance = Math.hypot(dx, dy)
+      const angle = ((Math.atan2(dy, dx) * 180) / Math.PI + 360) % 360
+      console.log('[wheel] release', ev.x, ev.y, 'center', center.x, center.y, 'angle', Math.round(angle), 'dist', Math.round(distance))
+      const result: Sector | 'cancel' =
+        distance < DEAD_ZONE ? 'cancel' : sectorForAngle(angle)
+      finishSelection(result)
+      break
+    }
+
+    default:
+      break
+  }
+}
+
+function configurePermissions(): void {
+  const isOurWindow = (contents: WebContents | null): boolean =>
+    Boolean(contents) &&
+    (contents === panel?.webContents ||
+      contents === overlay?.webContents ||
+      contents === shot?.webContents)
+
+  session.defaultSession.setPermissionRequestHandler((contents, permission, callback) => {
+    callback(permission === 'media' && isOurWindow(contents))
+  })
+  session.defaultSession.setPermissionCheckHandler(
+    (contents, permission) => permission === 'media' && isOurWindow(contents)
+  )
+}
+
+function bootstrap(): void {
+  if (!openStore(path.join(app.getPath('userData'), 'roulette.db'))) {
+    console.warn('[store] history is disabled for this run')
+  }
+
+  overlay = createOverlayWindow()
+  panel = createPanelWindow()
+  shot = createShotWindow()
+
+  configurePermissions()
+
+  // Warm the screen-capture pipeline so the first screenshot opens faster.
+  void desktopCapturer
+    .getSources({
+      types: ['screen'],
+      thumbnailSize: { width: 1, height: 1 },
+      fetchWindowIcons: false
+    })
+    .catch(() => {})
+
+  overlay.webContents.on('did-finish-load', () => console.log('[overlay] ready'))
+  panel.webContents.on('did-finish-load', () => console.log('[panel] ready'))
+  shot.webContents.on('did-finish-load', () => {
+    console.log('[shot] ready')
+    if (pendingShot) {
+      shot?.webContents.send('shot:show', pendingShot)
+      pendingShot = null
+    }
+  })
+  // Catch Escape in the main process too: the renderer may not have keyboard
+  // focus early in the overlay's life.
+  shot.webContents.on('before-input-event', (_event, input) => {
+    if (shotActive && input.type === 'keyDown' && input.key === 'Escape') {
+      cancelShot()
+    }
+  })
+
+  hook.on('event', onHookEvent)
+  hook.on('exit', () => {
+    console.warn('[hook] sidecar stopped; keyboard click mode still works')
+  })
+
+  if (!hook.start(hookPath())) {
+    console.warn('[hook] running without global mouse trigger')
+  }
+
+  const toggleClickWheel = (): void => {
+    if (active) {
+      finishSelection('cancel')
+    } else {
+      showWheel('click', screen.getCursorScreenPoint())
+    }
+  }
+
+  let clickShortcut: string | null = null
+  for (const shortcut of CLICK_SHORTCUTS) {
+    if (globalShortcut.register(shortcut, toggleClickWheel)) {
+      clickShortcut = shortcut
+      break
+    }
+  }
+  if (clickShortcut) console.log('[shortcut] click mode:', clickShortcut)
+  else console.warn('[shortcut] no click-mode shortcut available')
+
+  const openHistoryPanel = (): void => {
+    console.log('[shortcut] history panel')
+    if (panel?.isVisible()) {
+      sendToPanel('panel:history')
+      panel.focus()
+      return
+    }
+    openPanel('text', { openHistory: true })
+  }
+
+  let historyShortcut: string | null = null
+  for (const shortcut of HISTORY_SHORTCUTS) {
+    if (globalShortcut.register(shortcut, openHistoryPanel)) {
+      historyShortcut = shortcut
+      break
+    }
+  }
+  if (historyShortcut) console.log('[shortcut] history:', historyShortcut)
+  else console.warn('[shortcut] no history shortcut available')
+
+  ipcMain.on('wheel:select', (_event, sector: Sector) => finishSelection(sector))
+  ipcMain.on('wheel:cancel', () => finishSelection('cancel'))
+  ipcMain.on('panel:close', () => {
+    for (const controller of activeChats.values()) controller.abort()
+    activeChats.clear()
+    panel?.hide()
+  })
+  ipcMain.on('clipboard:write', (_event, text: string) => {
+    void clipboard.writeText(String(text))
+  })
+  ipcMain.on('panel:insert', (_event, text: string) => {
+    void insertText(String(text))
+  })
+
+  ipcMain.handle('settings:get', () => getPublicSettings())
+  ipcMain.handle('settings:key', () => getApiKey() ?? '')
+  ipcMain.handle('settings:save', (_event, input: SettingsInput) => saveSettings(input))
+
+  ipcMain.handle('history:list', () => listSessions())
+  ipcMain.handle('history:get', (_event, id: string) => {
+    const detail = getSession(String(id))
+    if (!detail) return null
+    return {
+      ...detail,
+      messages: detail.messages.map((message) => ({
+        ...message,
+        image: message.imagePath ? (readImageDataUrl(message.imagePath) ?? undefined) : undefined
+      }))
+    }
+  })
+  ipcMain.handle('history:delete', (_event, id: string) => {
+    const imagePaths = deleteSession(String(id))
+    for (const imagePath of imagePaths) {
+      try {
+        fs.unlinkSync(imagePath)
+      } catch {
+        // The file may already be gone; the row is what matters.
+      }
+    }
+    return listSessions()
+  })
+  ipcMain.handle('history:rename', (_event, id: string, title: string) => {
+    renameSession(String(id), String(title))
+    return listSessions()
+  })
+
+  ipcMain.on('shot:complete', (_event, payload: ShotCompletePayload) => finishShot(payload))
+  ipcMain.on('shot:cancel', () => cancelShot())
+  ipcMain.on('panel:capture', () => {
+    if (!shotActive) void startScreenshot(true)
+  })
+
+  ipcMain.handle('asr:status', () => getAsrStatus())
+  ipcMain.handle('asr:download', async () => {
+    try {
+      await downloadModel((status) => sendToPanel('asr:progress', status))
+    } catch (error) {
+      console.warn('[asr] download failed', error)
+    }
+    return getAsrStatus()
+  })
+  ipcMain.handle('asr:transcribe', (_event, request: TranscribeRequest) => {
+    const samples =
+      request?.samples instanceof Float32Array
+        ? request.samples
+        : new Float32Array(Array.isArray(request?.samples) ? request.samples : [])
+    const sampleRate = Number(request?.sampleRate) || 48000
+    return transcribe(samples, sampleRate)
+  })
+
+  ipcMain.on('chat:start', (_event, request: ChatRequest) => {
+    void handleChat(request)
+  })
+  ipcMain.on('chat:cancel', (_event, sessionId: string) => {
+    activeChats.get(sessionId)?.abort()
+  })
+}
+
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (panel?.isVisible()) panel.focus()
+  })
+
+  app.whenReady().then(bootstrap)
+
+  app.on('before-quit', () => {
+    hook.stop()
+    globalShortcut.unregisterAll()
+    closeStore()
+  })
+
+  app.on('window-all-closed', () => {
+    // Keep running; quitting will be owned by the tray/menu in a later milestone.
+  })
+}

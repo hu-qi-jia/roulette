@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>roulette spike</title>
+  <style>
+    html,
+    body {
+      margin: 0;
+      width: 420px;
+      height: 420px;
+      background: transparent;
+      overflow: hidden;
+    }
+    body {
+      font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+      user-select: none;
+    }
+    #wheel {
+      width: 420px;
+      height: 420px;
+      opacity: 0;
+      transition: opacity 70ms ease-out;
+      filter: drop-shadow(0 8px 24px rgba(0, 0, 0, 0.35));
+    }
+    #wheel.visible {
+      opacity: 1;
+    }
+    .sector {
+      stroke: rgba(255, 255, 255, 0.18);
+      stroke-width: 1.5;
+      transition: filter 70ms, stroke 70ms, stroke-width 70ms;
+    }
+    .sector.text {
+      fill: rgba(59, 130, 246, 0.88);
+    }
+    .sector.screenshot {
+      fill: rgba(34, 197, 94, 0.88);
+    }
+    .sector.voice {
+      fill: rgba(245, 158, 11, 0.88);
+    }
+    .sector.active {
+      filter: brightness(1.45) saturate(1.15);
+      stroke: #fff;
+      stroke-width: 3;
+    }
+    .label {
+      fill: #fff;
+      font-size: 20px;
+      font-weight: 600;
+      text-anchor: middle;
+      dominant-baseline: middle;
+      pointer-events: none;
+    }
+    .deadzone {
+      fill: rgba(17, 24, 39, 0.82);
+      stroke: rgba(255, 255, 255, 0.25);
+      stroke-width: 1.5;
+      transition: fill 70ms;
+    }
+    .deadzone.active {
+      fill: rgba(255, 255, 255, 0.92);
+    }
+    #cancel-label {
+      fill: #fff;
+      font-size: 13px;
+      opacity: 0.8;
+      text-anchor: middle;
+      dominant-baseline: middle;
+      pointer-events: none;
+    }
+    #cancel-label.active {
+      fill: #111;
+      opacity: 1;
+    }
+    #result {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 10px;
+      text-align: center;
+      color: #fff;
+      font-size: 14px;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+    }
+  </style>
+</head>
+<body>
+  <svg id="wheel" viewBox="0 0 420 420" xmlns="http://www.w3.org/2000/svg">
+    <path id="sec-text" class="sector text"></path>
+    <path id="sec-screenshot" class="sector screenshot"></path>
+    <path id="sec-voice" class="sector voice"></path>
+    <text class="label" x="210" y="90">文字</text>
+    <text class="label" x="106" y="270">截图</text>
+    <text class="label" x="314" y="270">语音</text>
+    <circle id="deadzone" class="deadzone" cx="210" cy="210" r="36"></circle>
+    <text id="cancel-label" x="210" y="212">取消</text>
+  </svg>
+  <div id="result"></div>
+
+  <script>
+    const CX = 210;
+    const CY = 210;
+    const R = 190;
+    const R_INNER = 44;
+    const DEAD_ZONE = 36;
+
+    const sectors = [
+      { id: 'text', start: 210, end: 330 },
+      { id: 'screenshot', start: 90, end: 210 },
+      { id: 'voice', start: 330, end: 450 }
+    ];
+    const labels = { text: '文字', screenshot: '截图', voice: '语音', cancel: '取消' };
+
+    function pt(radius, deg) {
+      const rad = (deg * Math.PI) / 180;
+      return [CX + radius * Math.cos(rad), CY + radius * Math.sin(rad)];
+    }
+
+    function arcPath(start, end) {
+      const [x1, y1] = pt(R, start);
+      const [x2, y2] = pt(R, end);
+      const [x3, y3] = pt(R_INNER, end);
+      const [x4, y4] = pt(R_INNER, start);
+      const large = end - start > 180 ? 1 : 0;
+      return [
+        `M ${x1} ${y1}`,
+        `A ${R} ${R} 0 ${large} 1 ${x2} ${y2}`,
+        `L ${x3} ${y3}`,
+        `A ${R_INNER} ${R_INNER} 0 ${large} 0 ${x4} ${y4}`,
+        'Z'
+      ].join(' ');
+    }
+
+    const paths = {};
+    for (const s of sectors) {
+      const el = document.getElementById('sec-' + s.id);
+      el.setAttribute('d', arcPath(s.start, s.end));
+      paths[s.id] = el;
+    }
+
+    const wheel = document.getElementById('wheel');
+    const deadzone = document.getElementById('deadzone');
+    const cancelLabel = document.getElementById('cancel-label');
+    const resultEl = document.getElementById('result');
+    let current = null;
+
+    function sectorForAngle(angle) {
+      if (angle >= 210 && angle < 330) return 'text';
+      if (angle >= 90 && angle < 210) return 'screenshot';
+      return 'voice';
+    }
+
+    function setHighlight(id) {
+      if (current === id) return;
+      current = id;
+      for (const k in paths) paths[k].classList.toggle('active', k === id);
+      deadzone.classList.toggle('active', id === 'cancel');
+      cancelLabel.classList.toggle('active', id === 'cancel');
+    }
+
+    if (window.wheelAPI) {
+      window.wheelAPI.onShow(() => {
+        setHighlight(null);
+        resultEl.textContent = '';
+        wheel.classList.add('visible');
+      });
+
+      window.wheelAPI.onMove(({ angle, dist }) => {
+        setHighlight(dist < DEAD_ZONE ? 'cancel' : sectorForAngle(angle));
+      });
+
+      window.wheelAPI.onResult(({ result }) => {
+        setHighlight(result);
+        resultEl.textContent = result === 'cancel' ? '取消' : '已选择：' + (labels[result] || result);
+      });
+    } else {
+      // Plain-browser preview (no Electron preload).
+      wheel.classList.add('visible');
+      setHighlight('text');
+      resultEl.textContent = '预览模式';
+    }
+  </script>
+</body>
+</html>
