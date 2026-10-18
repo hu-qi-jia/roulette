@@ -9,6 +9,7 @@ import {
   ArrowUpIcon,
   CameraIcon,
   CloseIcon,
+  DatabaseIcon,
   EyeIcon,
   EyeOffIcon,
   HistoryIcon,
@@ -25,6 +26,10 @@ import type {
   AppSettings,
   AsrStatus,
   ChatErrorCode,
+  KbDocumentSummary,
+  KbIngestProgress,
+  KbSource,
+  KbStatus,
   Sector,
   SessionKind,
   SessionSummary,
@@ -36,6 +41,7 @@ interface Message {
   role: 'user' | 'assistant'
   text: string
   image?: string
+  sources?: KbSource[]
   errorCode?: ChatErrorCode
   streaming?: boolean
 }
@@ -177,6 +183,14 @@ export default function Panel(): React.JSX.Element {
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [undoDelete, setUndoDelete] = useState<{ id: string; title: string } | null>(null)
+  const [kbOpen, setKbOpen] = useState(false)
+  const [kbStatus, setKbStatus] = useState<KbStatus | null>(null)
+  const [kbDocuments, setKbDocuments] = useState<KbDocumentSummary[]>([])
+  const [kbTitle, setKbTitle] = useState('')
+  const [kbText, setKbText] = useState('')
+  const [kbBusy, setKbBusy] = useState(false)
+  const [kbIngest, setKbIngest] = useState<KbIngestProgress | null>(null)
+  const [kbError, setKbError] = useState<string | null>(null)
 
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
@@ -309,7 +323,8 @@ export default function Panel(): React.JSX.Element {
       textModel: '',
       visionModel: '',
       hasApiKey: false,
-      asrAutoSend: false
+      asrAutoSend: false,
+      kbEnabled: true
     }
     populateSettingsDraft(cfg)
   }
@@ -381,7 +396,8 @@ export default function Panel(): React.JSX.Element {
           id: message.id,
           role: message.role,
           text: message.content,
-          image: message.image
+          image: message.image,
+          sources: message.sources
         }))
       )
       setPendingImage(null)
@@ -600,6 +616,102 @@ export default function Panel(): React.JSX.Element {
     }
   }
 
+  const refreshKb = async (): Promise<void> => {
+    try {
+      setKbDocuments(await window.roulette.listKbDocuments())
+      setKbStatus(await window.roulette.getKbStatus())
+    } catch (error) {
+      setKbError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  const openKbPanel = (): void => {
+    setKbOpen(true)
+    setKbError(null)
+    setKbIngest(null)
+    void refreshKb()
+  }
+
+  const prepareKbModel = async (): Promise<void> => {
+    setKbError(null)
+    try {
+      setKbStatus(await window.roulette.prepareKb())
+    } catch (error) {
+      setKbError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  const addKbText = async (): Promise<void> => {
+    const text = kbText.trim()
+    if (!text || kbBusy) return
+    setKbBusy(true)
+    setKbError(null)
+    setKbIngest(null)
+    try {
+      const document = await window.roulette.addKbText({
+        title: kbTitle.trim(),
+        text
+      })
+      if (!document) {
+        setKbError(t('kbInvalid'))
+        return
+      }
+      setKbTitle('')
+      setKbText('')
+      await refreshKb()
+      showToast(t('kbAdded'))
+    } catch (error) {
+      setKbError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setKbBusy(false)
+      setKbIngest(null)
+    }
+  }
+
+  const addKbFiles = async (): Promise<void> => {
+    if (kbBusy) return
+    setKbBusy(true)
+    setKbError(null)
+    setKbIngest(null)
+    try {
+      const documents = await window.roulette.addKbFiles()
+      await refreshKb()
+      if (documents.length > 0) {
+        showToast(t('kbFilesAdded', { count: documents.length }))
+      }
+    } catch (error) {
+      setKbError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setKbBusy(false)
+      setKbIngest(null)
+    }
+  }
+
+  const removeKbDocument = async (id: number): Promise<void> => {
+    try {
+      setKbDocuments(await window.roulette.deleteKbDocument(id))
+    } catch (error) {
+      setKbError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  const toggleKb = async (): Promise<void> => {
+    try {
+      setSettings(await window.roulette.setKbEnabled(!(settings?.kbEnabled ?? true)))
+    } catch (error) {
+      showToast(`${t('error')}${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  useEffect(() => {
+    const offStatus = window.roulette.onKbProgress((status) => setKbStatus(status))
+    const offIngest = window.roulette.onKbIngestProgress((progress) => setKbIngest(progress))
+    return () => {
+      offStatus()
+      offIngest()
+    }
+  }, [])
+
   useEffect(() => {
     if (!recording) return
     const started = Date.now()
@@ -691,9 +803,15 @@ export default function Panel(): React.JSX.Element {
       )
     })
 
-    const offDone = window.roulette.onChatDone(({ sessionId }) => {
+    const offDone = window.roulette.onChatDone(({ sessionId, sources }) => {
       if (sessionId !== sessionIdRef.current) return
-      finish(streamingIdRef.current)
+      const id = streamingIdRef.current
+      if (id != null && sources && sources.length > 0) {
+        setMessages((prev) =>
+          prev.map((message) => (message.id === id ? { ...message, sources } : message))
+        )
+      }
+      finish(id)
     })
 
     const offError = window.roulette.onChatError(({ sessionId, message, code }) => {
@@ -759,6 +877,10 @@ export default function Panel(): React.JSX.Element {
         setSettingsOpen(false)
         return
       }
+      if (kbOpen) {
+        setKbOpen(false)
+        return
+      }
       if (historyOpen) {
         setHistoryOpen(false)
         return
@@ -772,7 +894,7 @@ export default function Panel(): React.JSX.Element {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [settingsOpen, historyOpen, busy])
+  }, [settingsOpen, kbOpen, historyOpen, busy])
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' })
@@ -853,6 +975,11 @@ export default function Panel(): React.JSX.Element {
       ? Math.min(100, Math.round((asrStatus.receivedBytes / asrStatus.totalBytes) * 100))
       : 0
 
+  const kbPercent =
+    kbStatus && kbStatus.totalBytes > 0
+      ? Math.min(100, Math.round((kbStatus.receivedBytes / kbStatus.totalBytes) * 100))
+      : Math.round((kbStatus?.progress ?? 0) * 100)
+
   const hasConversation = messages.some((message) => message.id !== WELCOME_ID)
   const welcomeText =
     messages.find((message) => message.id === WELCOME_ID)?.text ?? t('welcome')
@@ -886,6 +1013,13 @@ export default function Panel(): React.JSX.Element {
             onClick={toggleHistory}
           >
             <HistoryIcon />
+          </button>
+          <button
+            className="icon-button kb-button"
+            title={t('knowledgeBase')}
+            onClick={openKbPanel}
+          >
+            <DatabaseIcon />
           </button>
         </div>
         <div className="brand">
@@ -943,6 +1077,22 @@ export default function Panel(): React.JSX.Element {
                     message.text
                   )}
                 </div>
+                {message.role === 'assistant' &&
+                  message.sources &&
+                  message.sources.length > 0 && (
+                    <div className="kb-sources">
+                      <div className="kb-sources-title">{t('sources')}</div>
+                      {message.sources.map((source, index) => (
+                        <div key={source.chunkId} className="kb-source">
+                          <span className="kb-source-index">[{index + 1}]</span>
+                          <span className="kb-source-title" title={source.title}>
+                            {source.title}
+                          </span>
+                          <span className="kb-source-snippet">{source.snippet}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 {message.role === 'assistant' &&
                   !message.streaming &&
                   message.text.trim() &&
@@ -1331,6 +1481,129 @@ export default function Panel(): React.JSX.Element {
                 onClick={() => void saveSettings()}
               >
                 {t('save')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {kbOpen && (
+        <div
+          className="modal-backdrop"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setKbOpen(false)
+          }}
+        >
+          <div className="settings-modal kb-modal">
+            <h2>{t('knowledgeBase')}</h2>
+
+            <div className="kb-status-row">
+              <span className={kbStatus?.installed ? 'asr-ok' : 'asr-missing'}>
+                {kbStatus?.downloading
+                  ? `${t('kbPreparing')} ${kbPercent}%`
+                  : kbStatus?.loading
+                    ? t('kbLoading')
+                    : kbStatus?.installed
+                      ? t('kbReady')
+                      : t('kbModelMissing')}
+              </span>
+              {!kbStatus?.installed && !kbStatus?.loading && (
+                <button className="ghost small" onClick={() => void prepareKbModel()}>
+                  {t('kbDownloadModel')}
+                </button>
+              )}
+            </div>
+            {kbStatus?.downloading && (
+              <div className="progress">
+                <div className="progress-fill" style={{ width: `${kbPercent}%` }} />
+              </div>
+            )}
+            {kbStatus?.error && <div className="asr-error">{kbStatus.error}</div>}
+
+            <div className="switch-row">
+              <span>{t('kbUseInChat')}</span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={settings?.kbEnabled ?? true}
+                className={`switch ${(settings?.kbEnabled ?? true) ? 'on' : ''}`}
+                onClick={() => void toggleKb()}
+              >
+                <span className="switch-knob" />
+              </button>
+            </div>
+
+            <div className="settings-divider" />
+
+            <div className="kb-add">
+              <input
+                value={kbTitle}
+                onChange={(event) => setKbTitle(event.target.value)}
+                placeholder={t('kbTitlePlaceholder')}
+              />
+              <textarea
+                value={kbText}
+                onChange={(event) => setKbText(event.target.value)}
+                placeholder={t('kbTextPlaceholder')}
+                rows={4}
+              />
+              <div className="kb-add-actions">
+                <button
+                  className="ghost"
+                  onClick={() => void addKbFiles()}
+                  disabled={kbBusy}
+                >
+                  {t('kbAddFiles')}
+                </button>
+                <button
+                  className="primary"
+                  onClick={() => void addKbText()}
+                  disabled={kbBusy || !kbText.trim()}
+                >
+                  {t('kbAdd')}
+                </button>
+              </div>
+              {kbBusy && kbIngest && (
+                <div className="kb-ingest">
+                  {t('kbEmbedding')} {kbIngest.current}/{kbIngest.total}
+                </div>
+              )}
+              {kbError && <div className="asr-error">{kbError}</div>}
+            </div>
+
+            <div className="settings-section">
+              <div className="settings-section-title">
+                {t('kbDocuments')} ({kbDocuments.length})
+              </div>
+              <div className="kb-documents">
+                {kbDocuments.length === 0 ? (
+                  <div className="history-empty">{t('kbEmpty')}</div>
+                ) : (
+                  kbDocuments.map((document) => (
+                    <div key={document.id} className="kb-doc">
+                      <div className="kb-doc-main">
+                        <div className="kb-doc-title">{document.title}</div>
+                        <div className="kb-doc-meta">
+                          {t('kbChunks', { count: document.chunkCount })} ·{' '}
+                          {document.source}
+                        </div>
+                      </div>
+                      <button
+                        className="history-delete"
+                        title={t('delete')}
+                        onClick={() => void removeKbDocument(document.id)}
+                      >
+                        <CloseIcon size={14} />
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            <div className="modal-actions">
+              <button className="ghost" onClick={() => setKbOpen(false)}>
+                {t('close')}
               </button>
             </div>
           </div>

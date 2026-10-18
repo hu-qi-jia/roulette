@@ -4,6 +4,8 @@ export interface EngineConfig {
   baseUrl: string
   apiKey: string
   model: string
+  /** Extra system instructions, e.g. retrieved knowledge-base context. */
+  systemContext?: string
 }
 
 const SYSTEM_PROMPT =
@@ -52,6 +54,9 @@ export async function* streamChat(
       stream: true,
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
+        ...(config.systemContext
+          ? [{ role: 'system', content: config.systemContext }]
+          : []),
         ...messages.map(toOpenAiMessage)
       ]
     }),

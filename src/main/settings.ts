@@ -8,6 +8,7 @@ interface StoredSettings {
   textModel: string
   visionModel: string
   asrAutoSend: boolean
+  kbEnabled: boolean
   apiKeyEnc?: string
 }
 
@@ -15,7 +16,8 @@ const EMPTY: StoredSettings = {
   baseUrl: '',
   textModel: '',
   visionModel: '',
-  asrAutoSend: false
+  asrAutoSend: false,
+  kbEnabled: true
 }
 
 function settingsPath(): string {
@@ -30,6 +32,7 @@ function loadStored(): StoredSettings {
       textModel: typeof parsed.textModel === 'string' ? parsed.textModel : '',
       visionModel: typeof parsed.visionModel === 'string' ? parsed.visionModel : '',
       asrAutoSend: parsed.asrAutoSend === true,
+      kbEnabled: parsed.kbEnabled !== false,
       apiKeyEnc: typeof parsed.apiKeyEnc === 'string' ? parsed.apiKeyEnc : undefined
     }
   } catch {
@@ -58,7 +61,8 @@ export function getPublicSettings(): AppSettings {
     textModel: envValue('ROULETTE_TEXT_MODEL') ?? stored.textModel,
     visionModel: envValue('ROULETTE_VISION_MODEL') ?? stored.visionModel,
     hasApiKey: Boolean(envKey || stored.apiKeyEnc),
-    asrAutoSend: stored.asrAutoSend
+    asrAutoSend: stored.asrAutoSend,
+    kbEnabled: stored.kbEnabled
   }
 }
 
@@ -85,6 +89,9 @@ export function saveSettings(input: SettingsInput): AppSettings {
   if (typeof input.asrAutoSend === 'boolean') {
     stored.asrAutoSend = input.asrAutoSend
   }
+  if (typeof input.kbEnabled === 'boolean') {
+    stored.kbEnabled = input.kbEnabled
+  }
 
   if (typeof input.apiKey === 'string') {
     const apiKey = input.apiKey.trim()
@@ -98,6 +105,13 @@ export function saveSettings(input: SettingsInput): AppSettings {
     }
   }
 
+  writeStored(stored)
+  return getPublicSettings()
+}
+
+export function setKbEnabled(enabled: boolean): AppSettings {
+  const stored = loadStored()
+  stored.kbEnabled = enabled
   writeStored(stored)
   return getPublicSettings()
 }

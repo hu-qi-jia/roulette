@@ -66,7 +66,45 @@ export interface StoredMessage {
   imagePath: string | null
   /** Data URL, filled in when history is loaded for display. */
   image?: string
+  /** Parsed knowledge-base sources for an assistant message. */
+  sources?: KbSource[]
+  /** Raw message metadata (sources, future annotations). */
+  meta?: string | null
   createdAt: number
+}
+
+export interface KbSource {
+  documentId: number
+  chunkId: number
+  title: string
+  snippet: string
+  distance: number
+}
+
+export interface KbDocumentSummary {
+  id: number
+  title: string
+  source: string
+  chunkCount: number
+  createdAt: number
+}
+
+export interface KbStatus {
+  installed: boolean
+  loading: boolean
+  downloading: boolean
+  progress: number
+  receivedBytes: number
+  totalBytes: number
+  modelId: string
+  modelDir: string
+  error?: string
+}
+
+export interface KbIngestProgress {
+  stage: 'embedding'
+  current: number
+  total: number
 }
 
 export interface SessionDetail extends SessionSummary {
@@ -79,6 +117,7 @@ export interface AppSettings {
   visionModel: string
   hasApiKey: boolean
   asrAutoSend: boolean
+  kbEnabled: boolean
 }
 
 export interface SettingsInput {
@@ -87,6 +126,7 @@ export interface SettingsInput {
   visionModel: string
   apiKey?: string
   asrAutoSend?: boolean
+  kbEnabled?: boolean
 }
 
 export interface AsrStatus {
@@ -134,6 +174,7 @@ export interface ChatDelta {
 
 export interface ChatDone {
   sessionId: string
+  sources?: KbSource[]
 }
 
 export interface ChatError {
@@ -186,6 +227,15 @@ export interface RouletteApi {
   downloadAsrModel(): Promise<AsrStatus>
   onAsrProgress(cb: (status: AsrStatus) => void): () => void
   transcribe(request: TranscribeRequest): Promise<AsrResult>
+  getKbStatus(): Promise<KbStatus>
+  prepareKb(): Promise<KbStatus>
+  listKbDocuments(): Promise<KbDocumentSummary[]>
+  addKbText(input: { title: string; text: string }): Promise<KbDocumentSummary | null>
+  addKbFiles(): Promise<KbDocumentSummary[]>
+  deleteKbDocument(id: number): Promise<KbDocumentSummary[]>
+  setKbEnabled(enabled: boolean): Promise<AppSettings>
+  onKbProgress(cb: (status: KbStatus) => void): () => void
+  onKbIngestProgress(cb: (progress: KbIngestProgress) => void): () => void
   onTestStopRecording(cb: () => void): () => void
 }
 

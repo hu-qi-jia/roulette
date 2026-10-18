@@ -6,11 +6,13 @@ Roulette is a resident desktop app: hold a mouse gesture to open a radial menu, 
 
 ## Status
 
-M2–M4 done: wheel overlay, hold + click selection, panel, settings, the OpenAI-compatible streaming engine, cursor insertion, persistent history, screenshot capture, and offline voice input. Packaging is next.
+M2–M4 done: wheel overlay, hold + click selection, panel, settings, the OpenAI-compatible streaming engine, cursor insertion, persistent history, screenshot capture, and offline voice input. A first version of the local knowledge base (v1.1) is also in place. Packaging is next.
 
 Pick 截图 on the wheel to freeze the display under the cursor, drag a region, and the crop opens in a new session; screenshots are attached to the turn, use the configured vision model, and stay available to follow-up turns. The composer's camera button captures into the current session instead.
 
 Pick 语音 (or press the mic in the composer) and the panel records from the microphone. Stopping sends the audio to the local SenseVoice model and puts the transcript in the input, where it can be edited before sending; Settings has an "auto-send" switch. The speech model (~228 MB) is downloaded on first use from Settings and never sends audio off the machine. See [ADR 0007](docs/adr/0007-local-asr-with-sherpa-onnx.md).
+
+The database icon in the panel header opens the knowledge base. Add pasted text or text files; they are chunked and embedded locally with `bge-small-zh-v1.5` (~24 MB, downloaded on first use) and indexed with `sqlite-vec`. When the "use knowledge base in chat" switch is on, the host retrieves the top passages and sends only those snippets to your configured provider; replies show their sources. See [ADR 0009](docs/adr/0009-local-knowledge-base.md).
 
 Insertion writes the result to the clipboard and then asks the native helper to paste. The target is re-resolved to whatever app is foreground after the panel hides. Native edit controls receive `WM_PASTE` at their caret; custom editors (Chromium, Electron, terminals) get a click at the wheel's invocation point to restore keyboard focus, then a simulated Ctrl+V. The clipboard is restored only after the helper confirms the paste. See [ADR 0004](docs/adr/0004-wm-paste-for-edit-controls.md).
 
@@ -71,6 +73,9 @@ These are development-only and gated by environment variables:
 - `ROULETTE_TEST_SETTINGS_EYE`: with the settings test, click the API-key eye toggle.
 - `ROULETTE_TEST_SETTINGS_SAVE`: with the settings test, toggle the auto-send switch and save.
 - `ROULETTE_TEST_HISTORY_ACTIONS`: exercise history search, filtering, rename, delete, and undo.
+- `ROULETTE_TEST_OPEN_PANEL`: open the text panel directly after startup (no mouse injection).
+- `ROULETTE_TEST_KB`: seed a knowledge-base document at startup.
+- `ROULETTE_TEST_KB_OPEN`: open the knowledge-base modal after the panel opens.
 - `ROULETTE_TEST_ASR_DOWNLOAD`: call the model downloader through the renderer IPC after the panel opens.
 - `ROULETTE_TEST_MIC_WAV`: feed this WAV file to `getUserMedia` through Chromium's fake audio device, for testing the voice flow without a microphone.
 - `ROULETTE_TEST_ASR_STOP_MS`: stop a voice recording this many milliseconds after the panel opens (used with the fake microphone).
@@ -98,6 +103,7 @@ ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ npm install
 - [ADR 0006: desktopCapturer for screenshots (superseded)](docs/adr/0006-desktop-capturer-for-screenshots.md)
 - [ADR 0007: local ASR with sherpa-onnx](docs/adr/0007-local-asr-with-sherpa-onnx.md)
 - [ADR 0008: GDI-first screenshot capture](docs/adr/0008-gdi-screenshot-capture.md)
+- [ADR 0009: local knowledge base](docs/adr/0009-local-knowledge-base.md)
 - [Glossary](GLOSSARY.md)
 - [Mouse-hook spike](spike/README.md)
 

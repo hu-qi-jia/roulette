@@ -3,6 +3,7 @@ import {
   BrowserWindow,
   clipboard,
   desktopCapturer,
+  dialog,
   globalShortcut,
   ipcMain,
   screen,
@@ -16,15 +17,26 @@ import os from 'node:os'
 import path from 'node:path'
 import { HookClient } from './hook-client'
 import { downloadModel, getAsrStatus, transcribe } from './asr'
+import {
+  getKbStatus,
+  ingestFiles,
+  ingestText,
+  prepareKb,
+  retrieveKb,
+  setKbIngestSink,
+  setKbProgressSink
+} from './kb'
 import { streamChat } from './engine'
-import { getApiKey, getPublicSettings, saveSettings } from './settings'
+import { getApiKey, getPublicSettings, saveSettings, setKbEnabled } from './settings'
 import {
   appendMessage,
   closeStore,
+  deleteKbDocument,
   deleteSession,
   ensureSession,
   getMessages,
   getSession,
+  listKbDocuments,
   listSessions,
   openStore,
   renameSession
@@ -40,6 +52,7 @@ import type {
   ChatMessage,
   ChatRequest,
   HookEvent,
+  KbSource,
   Sector,
   SessionKind,
   SettingsInput,
@@ -237,6 +250,15 @@ async function handleChat(request: ChatRequest): Promise<void> {
   // session can continue with its full history.
   const history = storedHistory(request.sessionId)
 
+  let sources: KbSource[] = []
+  if (settings.kbEnabled) {
+    sources = await retrieveKb(text)
+    if (sources.length > 0) {
+      console.log('[kb] retrieved', sources.length, 'chunks for', request.sessionId)
+    }
+  }
+  const systemContext = sources.length > 0 ? buildKbContext(sources) : undefined
+
   activeChats.get(request.sessionId)?.abort()
   const controller = new AbortController()
   activeChats.set(request.sessionId, controller)
@@ -246,7 +268,7 @@ async function handleChat(request: ChatRequest): Promise<void> {
   try {
     console.log('[chat] start', request.sessionId, 'turns:', history.length, 'model:', model)
     for await (const delta of streamChat(
-      { baseUrl: settings.baseUrl, apiKey, model },
+      { baseUrl: settings.baseUrl, apiKey, model, systemContext },
       history,
       controller.signal
     )) {
@@ -255,7 +277,7 @@ async function handleChat(request: ChatRequest): Promise<void> {
       sendToPanel('chat:delta', { sessionId: request.sessionId, delta })
     }
     console.log('[chat] done', request.sessionId, 'chars:', received)
-    sendToPanel('chat:done', { sessionId: request.sessionId })
+    sendToPanel('chat:done', { sessionId: request.sessionId, sources })
     if (panel) captureIfRequested(panel, 'out/chat-capture.png')
     if (process.env.ROULETTE_TEST_INSERT === '1' && output) {
       void insertText(output)
@@ -264,7 +286,7 @@ async function handleChat(request: ChatRequest): Promise<void> {
     console.warn('[chat] error', error)
     if (panel) captureIfRequested(panel, 'out/chat-error-capture.png')
     if (controller.signal.aborted) {
-      sendToPanel('chat:done', { sessionId: request.sessionId })
+      sendToPanel('chat:done', { sessionId: request.sessionId, sources })
     } else {
       emitChatError(
         request.sessionId,
@@ -280,9 +302,17 @@ async function handleChat(request: ChatRequest): Promise<void> {
     if (active === controller) activeChats.delete(request.sessionId)
     // Keep partial output on cancellation so a resumed session stays coherent.
     if (output.trim() && !superseded) {
-      appendMessage(request.sessionId, 'assistant', output.trim())
+      const meta = sources.length > 0 ? JSON.stringify({ sources }) : null
+      appendMessage(request.sessionId, 'assistant', output.trim(), null, meta)
     }
   }
+}
+
+function buildKbContext(sources: KbSource[]): string {
+  const lines = sources.map(
+    (source, index) => `[${index + 1}] ${source.title}\n${source.snippet}`
+  )
+  return `Use the following passages from the user's local knowledge base when they are relevant. Cite them as [1], [2], etc. Do not invent information that is not present in the passages.\n\n${lines.join('\n\n')}`
 }
 
 // Electron 44's async clipboard API refuses to write ClipboardItems returned by
@@ -846,6 +876,45 @@ function openPanel(
   maybeRunAsrDownloadTest()
   maybeRunHistoryOpenTest()
   maybeRunHistoryActionsTest()
+  maybeRunKbOpenTest()
+}
+
+// Dev-only: clicks the knowledge-base button and captures the modal.
+function maybeRunKbOpenTest(): void {
+  if (process.env.ROULETTE_TEST_KB_OPEN !== '1' || !panel) return
+  setTimeout(() => {
+    panel?.webContents
+      .executeJavaScript(
+        `(() => {
+          const button = document.querySelector('.kb-button');
+          if (!(button instanceof HTMLButtonElement)) return 'no-button';
+          button.click();
+          return 'clicked';
+        })()`
+      )
+      .then((result) => console.log('[test] kb open', result))
+      .catch((error) => console.warn('[test] kb open', error))
+    setTimeout(() => {
+      if (panel) captureIfRequested(panel, 'out/kb-capture.png')
+    }, 1200)
+  }, 1500)
+}
+
+// Dev-only: seeds a knowledge-base document so retrieval can be tested.
+function maybeSeedKbTest(): void {
+  if (process.env.ROULETTE_TEST_KB !== '1') return
+  if (listKbDocuments().length > 0) {
+    console.log('[test] kb already seeded')
+    return
+  }
+  const text = `Roulette 使用说明
+默认快捷键是按住 Alt 加鼠标右键呼出轮盘。
+轮盘上有文字、截图、语音、历史四个扇区。
+文字用于提问，截图用于识别屏幕区域，语音用于本地转写，历史用于恢复会话。
+设置里可以填写 OpenAI 兼容接口和模型。`
+  void ingestText('Roulette 使用说明', text, 'paste')
+    .then((document) => console.log('[test] kb ingested', document?.id ?? 'null'))
+    .catch((error) => console.warn('[test] kb ingest failed', error))
 }
 
 // Dev-only: opens the history drawer without resuming anything.
@@ -1099,8 +1168,7 @@ function configurePermissions(): void {
   )
 }
 
-function bootstrap(): void {
-  if (!openStore(path.join(app.getPath('userData'), 'roulette.db'))) {
+function bootstrap(): void {  if (!openStore(path.join(app.getPath('userData'), 'roulette.db'))) {
     console.warn('[store] history is disabled for this run')
   }
 
@@ -1109,6 +1177,13 @@ function bootstrap(): void {
   shot = createShotWindow()
 
   configurePermissions()
+  setKbProgressSink((status) => sendToPanel('kb:progress', status))
+  maybeSeedKbTest()
+  if (process.env.ROULETTE_TEST_OPEN_PANEL === '1') {
+    setTimeout(() => {
+      if (panel && !panel.isVisible()) openPanel('text')
+    }, 1500)
+  }
 
   console.log(
     '[display]',
@@ -1218,10 +1293,24 @@ function bootstrap(): void {
     if (!detail) return null
     return {
       ...detail,
-      messages: detail.messages.map((message) => ({
-        ...message,
-        image: message.imagePath ? (readImageDataUrl(message.imagePath) ?? undefined) : undefined
-      }))
+      messages: detail.messages.map((message) => {
+        let sources: KbSource[] | undefined
+        if (message.meta) {
+          try {
+            const parsed = JSON.parse(message.meta) as { sources?: KbSource[] }
+            if (Array.isArray(parsed.sources)) sources = parsed.sources
+          } catch {
+            // Ignore malformed metadata.
+          }
+        }
+        return {
+          ...message,
+          image: message.imagePath
+            ? (readImageDataUrl(message.imagePath) ?? undefined)
+            : undefined,
+          sources
+        }
+      })
     }
   })
   ipcMain.handle('history:delete', (_event, id: string) => {
@@ -1263,6 +1352,44 @@ function bootstrap(): void {
     const sampleRate = Number(request?.sampleRate) || 48000
     return transcribe(samples, sampleRate)
   })
+
+  ipcMain.handle('kb:status', () => getKbStatus())
+  ipcMain.handle('kb:prepare', () => prepareKb())
+  ipcMain.handle('kb:documents', () => listKbDocuments())
+  ipcMain.handle(
+    'kb:add-text',
+    async (_event, input: { title?: string; text?: string }) => {
+      setKbIngestSink((progress) => sendToPanel('kb:ingest', progress))
+      try {
+        return await ingestText(String(input?.title ?? ''), String(input?.text ?? ''), 'paste')
+      } finally {
+        setKbIngestSink(null)
+      }
+    }
+  )
+  ipcMain.handle('kb:add-files', async () => {
+    if (!panel) return []
+    const result = await dialog.showOpenDialog(panel, {
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        { name: 'Text', extensions: ['txt', 'md', 'markdown', 'csv', 'json', 'log'] }
+      ]
+    })
+    if (result.canceled || result.filePaths.length === 0) return []
+    setKbIngestSink((progress) => sendToPanel('kb:ingest', progress))
+    try {
+      return await ingestFiles(result.filePaths)
+    } finally {
+      setKbIngestSink(null)
+    }
+  })
+  ipcMain.handle('kb:delete', (_event, id: number) => {
+    deleteKbDocument(Number(id))
+    return listKbDocuments()
+  })
+  ipcMain.handle('kb:set-enabled', (_event, enabled: boolean) =>
+    setKbEnabled(Boolean(enabled))
+  )
 
   ipcMain.on('chat:start', (_event, request: ChatRequest) => {
     void handleChat(request)

@@ -46,9 +46,15 @@ const server = http.createServer((req, res) => {
       0
     )
     const reply = `Mock reply to: ${prompt || '(empty)'}`
+    const systemMessages = messages.filter((message) => message.role === 'system')
+    const hasKbContext = systemMessages.some(
+      (message) =>
+        typeof message.content === 'string' &&
+        (message.content.includes('knowledge base') || message.content.includes('知识库'))
+    )
 
     console.log(
-      `[mock] model=${parsed.model ?? '?'} turns=${messages.length} images=${images} prompt=${JSON.stringify(prompt)}`
+      `[mock] model=${parsed.model ?? '?'} turns=${messages.length} sys=${systemMessages.length} kb=${hasKbContext ? 1 : 0} images=${images} prompt=${JSON.stringify(prompt)}`
     )
 
     res.writeHead(200, {

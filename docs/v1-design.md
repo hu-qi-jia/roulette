@@ -115,6 +115,7 @@ Windows 桌面即时对话工具：全局触发 → 轮盘选动作 → 面板�
 | `session-store` | SQLite：sessions / messages |
 | `injector` | 锁定目标窗口、剪贴板快照、WM_PASTE / Ctrl+V、恢复、失败回退 |
 | `screenshot` | 原生 helper GDI 抓屏（desktopCapturer 回退）、canvas 裁剪与压缩 |
+| `kb` | 本地嵌入（bge-small-zh-v1.5）、sqlite-vec 索引、切块与检索、来源记录 |
 | `asr` | 本地 SenseVoice（sherpa-onnx-node），渲染进程采集 + 主进程转写，首次使用下载模型 |
 | `settings` | provider / key / model / 热键 / 语言 / 插入行为 |
 | `i18n` | zh-CN / en |
@@ -202,6 +203,13 @@ CREATE INDEX idx_messages_session ON messages(session_id, id);
 6. helper 回报粘贴结果后，主进程才恢复剪贴板；原剪贴板为空时保留结果，方便用户再次粘贴。
 7. 目标窗口已关闭、提权、焦点恢复失败或注入失败 → 结果显示在面板并提示复制。
 
+### 知识库（v1.1）
+
+1. 用户在知识库弹窗粘贴文本或选择文本文件；主进程切块、本地嵌入、写入 sqlite-vec。
+2. 对话时若开关开启且已建索引，主进程用查询向量检索前 5 个片段（距离 < 1.2）。
+3. 检索片段作为附加 system message 发给模型；助手消息的 `meta` 记录来源 JSON。
+4. 面板在回复下方展示「参考来源」；只把检索片段发给用户配置的 provider。
+
 ## 8. 隐私与安全
 
 - 无遥测、无账号、零后端。
@@ -238,6 +246,7 @@ CREATE INDEX idx_messages_session ON messages(session_id, id);
 | 本地 ASR 模型体积与首次加载 | 首次使用下载（约 228 MB）；懒加载约 1.5 s；HF 失败切 hf-mirror；可切云端点（后续） |
 | 麦克风被系统隐私设置拒绝 | 捕获 `getUserMedia` 错误并在面板提示，引导检查 Windows 隐私设置 |
 | Electron 体积与常驻内存 | v1 接受；后续评估 Tauri |
+| 嵌入模型下载失败 / 原生依赖 | hf-mirror 优先、HF 回退；sqlite-vec 失败时用 JS 余弦回退；M5 需 asarUnpack 原生文件 |
 | 提供商输出格式差异 | 只承诺 OpenAI 兼容协议；错误可视化 |
 
 ## 12. 里程碑
@@ -248,7 +257,7 @@ CREATE INDEX idx_messages_session ON messages(session_id, id);
 - **M3（已完成）**：截图。
 - **M4（已完成）**：语音。
 - **M5**：打包、自动更新、i18n 完成。
-- **v1.1**：知识库。
+- **v1.1（首版已完成）**：知识库。本地嵌入 + sqlite-vec，文本/文件摄取、检索、来源引用；PDF/URL/重索引留待后续。
 
 ## 13. 决策记录
 
@@ -260,4 +269,5 @@ CREATE INDEX idx_messages_session ON messages(session_id, id);
 - [ADR 0006：截图用 desktopCapturer](../adr/0006-desktop-capturer-for-screenshots.md)
 - [ADR 0007：本地 ASR 用 sherpa-onnx-node](../adr/0007-local-asr-with-sherpa-onnx.md)
 - [ADR 0008：截图改为 GDI 优先](../adr/0008-gdi-screenshot-capture.md)
+- [ADR 0009：知识库本地嵌入与 sqlite-vec](../adr/0009-local-knowledge-base.md)
 - [术语表](../../GLOSSARY.md)

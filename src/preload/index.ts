@@ -7,6 +7,9 @@ import type {
   ChatDone,
   ChatError,
   ChatRequest,
+  KbDocumentSummary,
+  KbIngestProgress,
+  KbStatus,
   PanelOpenPayload,
   RouletteApi,
   Sector,
@@ -79,6 +82,20 @@ const api: RouletteApi = {
   onAsrProgress: (cb) => subscribe<AsrStatus>('asr:progress', cb),
   transcribe: (request: TranscribeRequest) =>
     ipcRenderer.invoke('asr:transcribe', request) as Promise<AsrResult>,
+  getKbStatus: () => ipcRenderer.invoke('kb:status') as Promise<KbStatus>,
+  prepareKb: () => ipcRenderer.invoke('kb:prepare') as Promise<KbStatus>,
+  listKbDocuments: () =>
+    ipcRenderer.invoke('kb:documents') as Promise<KbDocumentSummary[]>,
+  addKbText: (input: { title: string; text: string }) =>
+    ipcRenderer.invoke('kb:add-text', input) as Promise<KbDocumentSummary | null>,
+  addKbFiles: () =>
+    ipcRenderer.invoke('kb:add-files') as Promise<KbDocumentSummary[]>,
+  deleteKbDocument: (id: number) =>
+    ipcRenderer.invoke('kb:delete', id) as Promise<KbDocumentSummary[]>,
+  setKbEnabled: (enabled: boolean) =>
+    ipcRenderer.invoke('kb:set-enabled', enabled) as Promise<AppSettings>,
+  onKbProgress: (cb) => subscribe<KbStatus>('kb:progress', cb),
+  onKbIngestProgress: (cb) => subscribe<KbIngestProgress>('kb:ingest', cb),
   onTestStopRecording: (cb) => subscribe<void>('test:stop-recording', cb)
 }
 
