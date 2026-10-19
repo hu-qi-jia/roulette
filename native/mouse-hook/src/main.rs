@@ -668,6 +668,16 @@ fn start_stdin_reader() {
                 Some("dragcancel") => {
                     DRAG_ACTIVE.store(false, Ordering::Relaxed);
                 }
+                Some("focus") => {
+                    let hwnd = parts
+                        .next()
+                        .and_then(|value| value.parse::<isize>().ok())
+                        .unwrap_or(0);
+                    if hwnd != 0 {
+                        eprintln!("[hook] focus command hwnd={}", hwnd);
+                        unsafe { activate_target(hwnd as HWND) };
+                    }
+                }
                 Some("foreground") => {
                     let hwnd = unsafe { GetForegroundWindow() };
                     let class = unsafe { class_name(hwnd) };

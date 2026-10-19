@@ -167,6 +167,9 @@ let shortcutErrors: Partial<Record<ShortcutAction, string>> = {}
 let shortcutCapture = false
 let panelPinned = true
 let dialogOpen = false
+/** Ignore focus churn while a panel is being summoned or revealed; otherwise
+ *  the wheel overlay (or a restore) can blur it and trigger auto-minimize. */
+let panelFocusGuardUntil = 0
 /** True while a synthetic paste owns the foreground; the panel must not
  *  auto-minimize when the target window activates. */
 let pasteActive = false
@@ -233,6 +236,8 @@ function minimizePanelIfUnpinned(): void {
   setTimeout(() => {
     if (panelPinned || !panel || panel.isMinimized() || !panel.isVisible()) return
     if (textDrag || shotActive || dialogOpen || pasteActive) return
+    if (active || overlay?.isVisible()) return
+    if (Date.now() < panelFocusGuardUntil) return
     if (panel.isFocused() || bubble?.isFocused()) return
     // Clicking the tray blurs the panel; do not race the tray's own toggle.
     if (Date.now() - trayInteractedAt < 800) return
@@ -299,13 +304,35 @@ function hidePanel(): void {
   panel?.hide()
 }
 
+/** Suppress unpinned auto-minimize while focus is being handed to the panel. */
+function markPanelFocus(): void {
+  panelFocusGuardUntil = Date.now() + 1000
+}
+
+/** Bring the existing panel to the foreground without resetting the session.
+ *  A native focus command is used because Windows can block focus changes from
+ *  a background Electron process. */
+function summonPanel(): void {
+  if (!panel) return
+  markPanelFocus()
+  if (panel.isMinimized()) panel.restore()
+  if (!panel.isVisible()) panel.showInactive()
+  const hwnd = windowHandle(panel)
+  if (hwnd && hook.isRunning()) hook.send(`focus ${hwnd}`)
+  panel.focus()
+  setImmediate(() => {
+    if (!panel) return
+    panel.focus()
+  })
+}
+
 /** The launcher and tray click toggle: visible -> minimize, minimized/hidden -> show. */
 function togglePanelFromLauncher(): void {
   if (!panel) return
   console.log('[launcher] toggle')
   if (panel.isMinimized()) {
     panel.restore()
-    panel.focus()
+    summonPanel()
     return
   }
   if (panel.isVisible()) {
@@ -318,13 +345,8 @@ function togglePanelFromLauncher(): void {
 /** Tray menu "open": never minimizes a panel that is already on screen. */
 function showPanelFromLauncher(): void {
   if (!panel) return
-  if (panel.isMinimized()) {
-    panel.restore()
-    panel.focus()
-    return
-  }
-  if (panel.isVisible()) {
-    panel.focus()
+  if (panel.isMinimized() || panel.isVisible()) {
+    summonPanel()
     return
   }
   openPanel('text')
@@ -1072,7 +1094,9 @@ function maybeRunHistoryTest(): void {
 function showWheel(nextMode: WheelMode, at: { x: number; y: number }): void {
   if (!overlay) return
   if (panel?.isVisible() && !panel.isMinimized()) {
-    panel.focus()
+    // The panel may be visible but behind another app after an insert or drop.
+    // Bring it back instead of doing nothing.
+    summonPanel()
     return
   }
 
@@ -1521,6 +1545,7 @@ function showPanelWindow(): void {
   }
   if (!panelShowPending || !panel) return
   panelShowPending = false
+  markPanelFocus()
   if (panel.isMinimized()) panel.restore()
   const started = PERF ? performance.now() : 0
   if (!panel.isVisible()) panel.showInactive()
@@ -1548,10 +1573,7 @@ function revealPanel(): void {
   panelShowPending = false
   if (panel.isMinimized()) panel.restore()
   if (!panel.isVisible()) panel.showInactive()
-  setImmediate(() => {
-    if (!panel) return
-    panel.focus()
-  })
+  summonPanel()
 }
 
 function openPanel(
@@ -1565,6 +1587,7 @@ function openPanel(
   // "restored from minimize" as a fresh reveal so the ack path shows and
   // focuses it even when restore() already made it visible.
   const wasVisible = panel.isVisible() && !wasMinimized
+  markPanelFocus()
   if (wasMinimized) panel.restore()
   if (!panel.webContents.isLoading()) {
     panel.webContents.send('panel:open', {
