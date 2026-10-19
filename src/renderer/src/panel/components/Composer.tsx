@@ -139,7 +139,10 @@ export function Composer({
         <button
           className={busy ? 'send stop' : 'send'}
           title={busy ? t('stop') : t('send')}
-          onClick={busy ? onStop : onSend}
+          onClick={() => {
+            if (busy) onStop()
+            else onSend()
+          }}
           disabled={sendDisabled}
         >
           {busy ? <StopIcon /> : <ArrowUpIcon />}

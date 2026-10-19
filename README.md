@@ -32,6 +32,8 @@ The header pin toggles always-on-top. With it off, the panel behaves like a norm
 
 Finished answers expose icon actions for insert, copy, and retry. Retry removes the last assistant reply from the conversation, reuses the existing user turn (including its image), and regenerates it without duplicating the question. Error replies offer retry as well.
 
+There is no app-side character limit on the composer or on replies. Long input scrolls inside the composer and is sent in full; the provider's model context window is the only limit. Session titles are shortened for display only.
+
 History lives in `%APPDATA%\roulette\roulette.db` (Node's built-in `node:sqlite`, see [ADR 0005](docs/adr/0005-node-sqlite-for-history.md)); screenshots are stored next to it under `images/`. Every panel open starts a new session; the history page lists earlier sessions and resumes them with their full context.
 
 ## Develop

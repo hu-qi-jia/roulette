@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { app } from 'electron'
 import { getLoadablePath } from 'sqlite-vec'
 import type {
   KbDocumentSummary,
@@ -13,6 +14,22 @@ import type {
 const TITLE_LENGTH = 40
 const PREVIEW_LENGTH = 60
 const VECTOR_DIMENSION = 512
+
+/** SQLite loads the extension through LoadLibrary, which cannot read a path
+ *  inside app.asar. Prefer the unpacked copy in packaged builds. */
+function loadableVecPath(): string {
+  if (app.isPackaged) {
+    const unpacked = path.join(
+      process.resourcesPath,
+      'app.asar.unpacked',
+      'node_modules',
+      'sqlite-vec-windows-x64',
+      'vec0.dll'
+    )
+    if (fs.existsSync(unpacked)) return unpacked
+  }
+  return getLoadablePath()
+}
 
 let db: DatabaseSync | null = null
 let vectorMode: 'vec0' | 'blob' = 'blob'
@@ -84,7 +101,7 @@ export function openStore(file: string): boolean {
     fs.mkdirSync(path.dirname(file), { recursive: true })
     db = new DatabaseSync(file, { allowExtension: true } as never)
     try {
-      db.loadExtension(getLoadablePath())
+      db.loadExtension(loadableVecPath())
       vectorMode = 'vec0'
     } catch (error) {
       console.warn('[store] sqlite-vec unavailable; using JS cosine fallback', error)
