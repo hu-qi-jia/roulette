@@ -12,7 +12,8 @@ import type {
   AsrStatus,
   KbSource,
   Sector,
-  SessionSummary
+  SessionSummary,
+  ShortcutInfo
 } from '../../../shared/types'
 import { ChatView } from './components/ChatView'
 import { Composer } from './components/Composer'
@@ -74,6 +75,7 @@ export default function Panel(): React.JSX.Element {
   const [sessionTitle, setSessionTitle] = useState('')
   const [pendingImage, setPendingImage] = useState<string | null>(null)
   const [asrStatus, setAsrStatus] = useState<AsrStatus | null>(null)
+  const [shortcuts, setShortcuts] = useState<ShortcutInfo | null>(null)
   const [autoSendPending, setAutoSendPending] = useState(false)
   const [settingsFocus, setSettingsFocus] = useState<'vector' | null>(null)
 
@@ -543,6 +545,10 @@ export default function Panel(): React.JSX.Element {
     setSettingsFocus(null)
     void kb.refresh()
     void window.roulette
+      .getShortcuts()
+      .then((info) => setShortcuts(info))
+      .catch(() => setShortcuts(null))
+    void window.roulette
       .getAsrStatus()
       .then((status) => setAsrStatus(status))
       .catch(() => {})
@@ -759,6 +765,7 @@ export default function Panel(): React.JSX.Element {
           onDownloadAsr={() => void downloadAsr()}
           kbStatus={kb.status}
           onPrepareKb={() => void kb.prepare()}
+          shortcuts={shortcuts}
           focus={settingsFocus}
         />
       )}

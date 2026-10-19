@@ -53,7 +53,10 @@ export function isEmbeddingModelInstalled(): boolean {
 export function getKbStatus(): KbStatus {
   return {
     installed: isEmbeddingModelInstalled(),
-    loading: loading !== null || extractor !== null,
+    // `extractor` is non-null after the model has loaded. Only a pending
+    // load means "loading"; otherwise the settings page would show the
+    // loading state forever once the model is ready.
+    loading: loading !== null,
     downloading: progress.downloading,
     progress: progress.ratio,
     receivedBytes: progress.receivedBytes,

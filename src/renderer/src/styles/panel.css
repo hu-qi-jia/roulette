@@ -1051,6 +1051,19 @@ body[data-route='panel'] {
   flex: 1;
 }
 
+.settings-row kbd {
+  flex: none;
+  padding: 3px 7px;
+  border: 1px solid var(--line-card);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: var(--text-caption);
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
 .dot {
   flex: none;
   width: 7px;

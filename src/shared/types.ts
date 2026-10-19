@@ -144,6 +144,15 @@ export interface AsrResult {
   emotion: string
 }
 
+export interface ShortcutInfo {
+  /** Hold gesture; null when the native mouse hook is unavailable. */
+  hold: string | null
+  /** Registered accelerator for click mode, if one was available. */
+  click: string | null
+  /** Registered accelerator for the history panel, if available. */
+  history: string | null
+}
+
 export interface TranscribeRequest {
   samples: Float32Array
   sampleRate: number
@@ -210,6 +219,7 @@ export interface RouletteApi {
   insertText(text: string): void
   onInsertFailed(cb: () => void): () => void
   getSettings(): Promise<AppSettings>
+  getShortcuts(): Promise<ShortcutInfo>
   getApiKey(): Promise<string>
   saveSettings(input: SettingsInput): Promise<AppSettings>
   listSessions(): Promise<SessionSummary[]>

@@ -70,6 +70,12 @@ const DEAD_ZONE = 76
 const CLICK_SHORTCUTS = ['Control+Shift+Space', 'Alt+Shift+Space', 'Control+Alt+R']
 const HISTORY_SHORTCUTS = ['Control+Alt+H', 'Alt+Shift+H']
 const SHOT_ESCAPE = 'Escape'
+// The native paste helper waits for the target window to own the foreground;
+// a short delay is enough for the panel to disappear. Overridable for tests.
+const INSERT_FOCUS_DELAY_MS = (() => {
+  const value = Number(process.env.ROULETTE_TEST_INSERT_DELAY_MS)
+  return Number.isFinite(value) && value >= 0 ? value : 100
+})()
 
 // Set ROULETTE_PERF=1 to log startup and pipeline timings to the console.
 const PERF = process.env.ROULETTE_PERF === '1'
@@ -116,6 +122,9 @@ let lastWheelHovered: WheelResult | null = null
 let panelShowPending = false
 let panelShowTimer: NodeJS.Timeout | null = null
 let shotStartedAt = 0
+let clickShortcut: string | null = null
+let historyShortcut: string | null = null
+const HOLD_SHORTCUT = 'Alt+RightClick'
 const activeChats = new Map<string, AbortController>()
 
 function toDip(x: number, y: number): { x: number; y: number } {
@@ -490,8 +499,9 @@ async function insertText(text: string): Promise<void> {
 
     panel?.hide()
     // Give the OS time to hand the foreground and keyboard focus back to the
-    // previous app before any keystrokes are injected.
-    await delay(1500)
+    // previous app before any keystrokes are injected. The native helper also
+    // waits for the target to become foreground, so this can be short.
+    await delay(INSERT_FOCUS_DELAY_MS)
 
     // Prefer the window that is foreground right now over the window that was
     // under the cursor when the wheel opened: the user may have switched apps.
@@ -1436,7 +1446,7 @@ function bootstrap(): void {
     }
   }
 
-  let clickShortcut: string | null = null
+  clickShortcut = null
   for (const shortcut of CLICK_SHORTCUTS) {
     if (globalShortcut.register(shortcut, toggleClickWheel)) {
       clickShortcut = shortcut
@@ -1456,7 +1466,7 @@ function bootstrap(): void {
     openPanel('text', { openHistory: true })
   }
 
-  let historyShortcut: string | null = null
+  historyShortcut = null
   for (const shortcut of HISTORY_SHORTCUTS) {
     if (globalShortcut.register(shortcut, openHistoryPanel)) {
       historyShortcut = shortcut
@@ -1482,6 +1492,11 @@ function bootstrap(): void {
   })
 
   ipcMain.handle('settings:get', () => getPublicSettings())
+  ipcMain.handle('shortcuts:get', () => ({
+    hold: hook.isRunning() ? HOLD_SHORTCUT : null,
+    click: clickShortcut,
+    history: historyShortcut
+  }))
   ipcMain.handle('settings:key', () => getApiKey() ?? '')
   ipcMain.handle('settings:save', (_event, input: SettingsInput) => saveSettings(input))
 

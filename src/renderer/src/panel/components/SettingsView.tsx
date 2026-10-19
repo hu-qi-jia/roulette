@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { AsrStatus, KbStatus } from '../../../../shared/types'
+import type { AsrStatus, KbStatus, ShortcutInfo } from '../../../../shared/types'
 import { EyeIcon, EyeOffIcon } from '../../icons'
 import type { SettingsDraft } from '../hooks/useSettingsDraft'
 import { Toggle } from './Toggle'
@@ -15,7 +15,13 @@ interface SettingsViewProps {
   onDownloadAsr: () => void
   kbStatus: KbStatus | null
   onPrepareKb: () => void
+  shortcuts: ShortcutInfo | null
   focus: 'vector' | null
+}
+
+function formatAccelerator(value: string | null, fallback: string): string {
+  if (!value) return fallback
+  return value.replace(/\bControl\b/g, 'Ctrl').replace(/\+/g, ' + ')
 }
 
 export function SettingsView({
@@ -28,6 +34,7 @@ export function SettingsView({
   onDownloadAsr,
   kbStatus,
   onPrepareKb,
+  shortcuts,
   focus
 }: SettingsViewProps): React.JSX.Element {
   const { t } = useTranslation()
@@ -216,6 +223,30 @@ export function SettingsView({
               label={t('kbUseInChat')}
               onChange={() => setDraft({ kbEnabled: !draft.kbEnabled })}
             />
+          </div>
+        </section>
+
+        <section className="settings-block">
+          <h3 className="settings-block-title">{t('shortcuts')}</h3>
+
+          <div className="settings-row">
+            <span>{t('holdShortcut')}</span>
+            <span className="grow" />
+            <kbd>
+              {shortcuts?.hold ? t('holdShortcutValue') : t('notAvailable')}
+            </kbd>
+          </div>
+
+          <div className="settings-row">
+            <span>{t('clickShortcut')}</span>
+            <span className="grow" />
+            <kbd>{formatAccelerator(shortcuts?.click ?? null, t('notAvailable'))}</kbd>
+          </div>
+
+          <div className="settings-row">
+            <span>{t('historyShortcut')}</span>
+            <span className="grow" />
+            <kbd>{formatAccelerator(shortcuts?.history ?? null, t('notAvailable'))}</kbd>
           </div>
         </section>
 

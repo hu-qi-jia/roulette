@@ -16,6 +16,7 @@ import type {
   SessionDetail,
   SessionSummary,
   SettingsInput,
+  ShortcutInfo,
   ShotCompletePayload,
   ShotShowPayload,
   TranscribeRequest,
@@ -58,6 +59,7 @@ const api: RouletteApi = {
     return () => ipcRenderer.removeListener('insert:failed', listener)
   },
   getSettings: () => ipcRenderer.invoke('settings:get') as Promise<AppSettings>,
+  getShortcuts: () => ipcRenderer.invoke('shortcuts:get') as Promise<ShortcutInfo>,
   getApiKey: () => ipcRenderer.invoke('settings:key') as Promise<string>,
   saveSettings: (input: SettingsInput) =>
     ipcRenderer.invoke('settings:save', input) as Promise<AppSettings>,
