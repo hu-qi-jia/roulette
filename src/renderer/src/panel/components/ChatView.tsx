@@ -1,6 +1,7 @@
 import { memo, type RefObject } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { KbSource } from '../../../../shared/types'
+import logo from '../../assets/logo.webp'
 import { ArrowRightIcon } from '../../icons'
 import { ACTIONABLE_ERRORS, WELCOME_ID } from '../constants'
 import type { Message } from '../types'
@@ -127,9 +128,7 @@ export function ChatView({
     <main className="panel-body chat-body" ref={scrollRef}>
       {!hasConversation ? (
         <div className="empty-state">
-          <div className="empty-mark" aria-hidden="true">
-            R
-          </div>
+          <img className="empty-mark" src={logo} alt="" aria-hidden="true" draggable={false} />
           <h1>{t('appName')}</h1>
           <p>{welcomeText}</p>
           <span className="empty-hint">{t('shortcutHint')}</span>

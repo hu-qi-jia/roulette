@@ -1,4 +1,5 @@
 import { useTranslation } from 'react-i18next'
+import logo from '../../assets/logo.webp'
 import {
   BackIcon,
   CloseIcon,
@@ -35,9 +36,7 @@ export function PanelHeader({
   return (
     <header className="panel-bar">
       {view === 'chat' ? (
-        <span className="logo" aria-hidden="true">
-          R
-        </span>
+        <img className="logo" src={logo} alt="" aria-hidden="true" draggable={false} />
       ) : (
         <button className="icon back-button" title={t('back')} onClick={onBack}>
           <BackIcon />

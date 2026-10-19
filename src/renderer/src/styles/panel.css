@@ -34,14 +34,10 @@ body[data-route='panel'] {
   flex: none;
   width: 28px;
   height: 28px;
-  display: grid;
-  place-items: center;
-  border-radius: 9px;
-  background: var(--ink);
-  color: var(--acid);
-  font-size: 13.5px;
-  font-weight: 700;
-  line-height: 1;
+  display: block;
+  object-fit: contain;
+  pointer-events: none;
+  -webkit-user-drag: none;
   user-select: none;
 }
 
@@ -134,17 +130,12 @@ body[data-route='panel'] {
 .empty-mark {
   width: 52px;
   height: 52px;
-  display: grid;
-  place-items: center;
+  display: block;
   margin-bottom: 14px;
-  border-radius: 18px;
-  background: var(--ink);
-  color: var(--acid);
-  font-size: 24px;
-  font-weight: 700;
-  line-height: 1;
+  filter: drop-shadow(6px 6px 0 var(--acid));
   transform: rotate(-4deg);
-  box-shadow: 6px 6px 0 var(--acid);
+  pointer-events: none;
+  -webkit-user-drag: none;
   user-select: none;
 }
 
@@ -644,7 +635,7 @@ body[data-route='panel'] {
   place-items: center;
   padding: 0;
   border: 0;
-  border-radius: 13px;
+  border-radius: 16px;
   background: var(--acid);
   color: var(--ink);
   cursor: pointer;
