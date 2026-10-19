@@ -39,7 +39,10 @@ export function createOverlayWindow(): BrowserWindow {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: false,
+      // Keep rAF running while the window is hidden so the renderer can
+      // commit a frame before we map it.
+      backgroundThrottling: false
     }
   })
   win.setAlwaysOnTop(true, 'screen-saver')
@@ -65,7 +68,8 @@ export function createPanelWindow(): BrowserWindow {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: false,
+      backgroundThrottling: false
     }
   })
   // Windows 11 can still attach a DWM shadow to frameless transparent
@@ -90,12 +94,13 @@ export function createShotWindow(): BrowserWindow {
     show: false,
     hasShadow: false,
     alwaysOnTop: true,
-    backgroundColor: '#000000',
+    transparent: true,
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: false,
+      backgroundThrottling: false
     }
   })
   win.setAlwaysOnTop(true, 'screen-saver')

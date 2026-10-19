@@ -34,7 +34,13 @@ const api: RouletteApi = {
   onWheelShow: (cb) => subscribe<WheelShowPayload>('wheel:show', cb),
   onWheelMove: (cb) => subscribe<WheelMovePayload>('wheel:move', cb),
   onWheelResult: (cb) => subscribe<WheelResult>('wheel:result', cb),
+  onWheelHide: (cb) => {
+    const listener = (): void => cb()
+    ipcRenderer.on('wheel:hide', listener)
+    return () => ipcRenderer.removeListener('wheel:hide', listener)
+  },
   onPanelOpen: (cb) => subscribe<PanelOpenPayload>('panel:open', cb),
+  panelReady: () => ipcRenderer.send('panel:ready'),
   onOpenHistory: (cb) => {
     const listener = (): void => cb()
     ipcRenderer.on('panel:history', listener)
@@ -75,6 +81,7 @@ const api: RouletteApi = {
     return () => ipcRenderer.removeListener('panel:attach', listener)
   },
   onShotShow: (cb) => subscribe<ShotShowPayload>('shot:show', cb),
+  hideShot: () => ipcRenderer.send('shot:hide'),
   completeShot: (payload: ShotCompletePayload) =>
     ipcRenderer.send('shot:complete', payload),
   cancelShot: () => ipcRenderer.send('shot:cancel'),

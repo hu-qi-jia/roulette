@@ -1,5 +1,6 @@
 body[data-route='shot'] {
   overflow: hidden;
+  background: transparent;
   cursor: crosshair;
   user-select: none;
   -webkit-user-select: none;
@@ -9,7 +10,7 @@ body[data-route='shot'] {
   position: fixed;
   inset: 0;
   overflow: hidden;
-  background: #000;
+  background: transparent;
   cursor: crosshair;
 }
 

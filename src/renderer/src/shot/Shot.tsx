@@ -84,6 +84,9 @@ export default function Shot(): React.JSX.Element {
         window.roulette.cancelShot()
         return
       }
+      // Hide the frozen screen immediately; crop/encode runs while the panel
+      // opens instead of keeping a static full-screen window on top.
+      window.roulette.hideShot()
       void finish(selection)
     }
 
@@ -109,7 +112,13 @@ export default function Shot(): React.JSX.Element {
     window.roulette.completeShot(result)
   }
 
-  if (!payload) return <div className="shot" />
+  if (!payload) {
+    return (
+      <div className="shot">
+        <div className="shot-dim" />
+      </div>
+    )
+  }
 
   const originX = payload.virtual.x
   const originY = payload.virtual.y

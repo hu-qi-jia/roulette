@@ -125,6 +125,14 @@ export default function Overlay(): JSX.Element {
       setHovered(value)
     })
 
+    const offHide = window.roulette.onWheelHide(() => {
+      // Reset while the window is hidden so the next show cannot flash the
+      // previous hover/result for a frame.
+      setVisible(false)
+      setHovered(null)
+      setResult(null)
+    })
+
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') window.roulette.cancelWheel()
     }
@@ -134,6 +142,7 @@ export default function Overlay(): JSX.Element {
       offShow()
       offMove()
       offResult()
+      offHide()
       window.removeEventListener('keydown', onKey)
     }
   }, [])

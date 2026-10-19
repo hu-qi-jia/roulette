@@ -313,7 +313,19 @@ export default function Panel(): React.JSX.Element {
   useEffect(() => {
     return window.roulette.onPanelAttach(({ image }) => {
       setPendingImage(image)
-      requestAnimationFrame(() => inputRef.current?.focus())
+      const preview = new Image()
+      preview.src = image
+      void preview
+        .decode()
+        .catch(() => {})
+        .finally(() => {
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              window.roulette.panelReady()
+              inputRef.current?.focus()
+            })
+          })
+        })
     })
   }, [])
 
@@ -339,6 +351,28 @@ export default function Panel(): React.JSX.Element {
       setPendingImage(payload.image ?? null)
       setView(payload.openHistory ? 'history' : 'chat')
       if (payload.openHistory) void history.refresh()
+      // Replace the previous conversation before the window is mapped so the
+      // first visible frame is the new session, not the old messages.
+      const configuredNow = isConfigured(settings)
+      setMessages([
+        {
+          id: WELCOME_ID,
+          role: 'assistant',
+          text: configuredNow ? t('welcome') : t('configureFirst')
+        }
+      ])
+      const notifyReady = (): void => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => window.roulette.panelReady())
+        })
+      }
+      if (payload.image) {
+        const preview = new Image()
+        preview.src = payload.image
+        void preview.decode().catch(() => {}).finally(notifyReady)
+      } else {
+        notifyReady()
+      }
 
       void window.roulette
         .getSettings()

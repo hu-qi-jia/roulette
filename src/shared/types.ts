@@ -198,7 +198,9 @@ export interface RouletteApi {
   onWheelShow(cb: (p: WheelShowPayload) => void): () => void
   onWheelMove(cb: (p: WheelMovePayload) => void): () => void
   onWheelResult(cb: (r: WheelResult) => void): () => void
+  onWheelHide(cb: () => void): () => void
   onPanelOpen(cb: (p: PanelOpenPayload) => void): () => void
+  panelReady(): void
   onOpenHistory(cb: () => void): () => void
   selectSector(sector: Sector): void
   cancelWheel(): void
@@ -222,6 +224,7 @@ export interface RouletteApi {
   captureScreenshot(): void
   onPanelAttach(cb: (p: { image: string }) => void): () => void
   onShotShow(cb: (p: ShotShowPayload) => void): () => void
+  hideShot(): void
   completeShot(payload: ShotCompletePayload): void
   cancelShot(): void
   getAsrStatus(): Promise<AsrStatus>

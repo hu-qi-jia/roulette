@@ -113,6 +113,9 @@ let shotActive = false
 let shotFromPanel = false
 let pendingShot: ShotShowPayload | null = null
 let lastWheelHovered: WheelResult | null = null
+let panelShowPending = false
+let panelShowTimer: NodeJS.Timeout | null = null
+let shotStartedAt = 0
 const activeChats = new Map<string, AbortController>()
 
 function toDip(x: number, y: number): { x: number; y: number } {
@@ -680,6 +683,9 @@ function hideWheel(): void {
   active = false
   if (!overlay) return
   const started = PERF ? performance.now() : 0
+  // Clear the visible state while hidden so the next show cannot flash the
+  // previous sector/selection for a frame before wheel:show arrives.
+  sendToOverlay('wheel:hide')
   overlay.hide()
   if (started) perf('overlay.hide()', Math.round(performance.now() - started))
   overlay.setIgnoreMouseEvents(true, { forward: true })
@@ -853,7 +859,8 @@ async function startScreenshot(fromPanel: boolean): Promise<void> {
   if (!shot || shotActive) return
   shotActive = true
   shotFromPanel = fromPanel
-  const startedAt = Date.now()
+  shotStartedAt = Date.now()
+  const startedAt = shotStartedAt
 
   try {
     let step = PERF ? performance.now() : 0
@@ -898,17 +905,10 @@ async function startScreenshot(fromPanel: boolean): Promise<void> {
     }
     sendShotShow({ virtual, displays: captures })
     console.log(
-      '[shot] ready',
-      virtual.width,
-      'x',
-      virtual.height,
-      'displays:',
-      captures.length,
-      'focused:',
-      BrowserWindow.getFocusedWindow() === shot,
-      'in',
+      '[shot] shown in',
       Date.now() - startedAt,
-      'ms'
+      'ms; focused:',
+      BrowserWindow.getFocusedWindow() === shot
     )
   } catch (error) {
     console.error('[shot] capture failed', error)
@@ -937,10 +937,20 @@ function finishShot(payload: ShotCompletePayload): void {
   console.log('[shot] selected', payload.width, 'x', payload.height, 'fromPanel:', fromPanel)
 
   if (fromPanel) {
+    if (!panel) return
     const started = PERF ? performance.now() : 0
-    revealPanel()
-    if (started) perf('panel reveal', Math.round(performance.now() - started))
-    sendToPanel('panel:attach', { image: payload.image })
+    const wasVisible = panel.isVisible()
+    if (!panel.webContents.isLoading()) {
+      panel.webContents.send('panel:attach', { image: payload.image })
+    }
+    if (wasVisible) {
+      setImmediate(() => {
+        if (!panel) return
+        panel.focus()
+      })
+    } else {
+      schedulePanelShow()
+    }
     if (started) {
       perf(`panel:attach sent ${Math.round(performance.now() - started)}ms`, {
         imageChars: payload.image.length
@@ -964,11 +974,40 @@ function cancelShot(): void {
   }
 }
 
-/** Maps the panel immediately without paying the foreground-activation cost
- *  before its first paint. `show()` blocks the main process for ~45 ms on
- *  Windows; `showInactive()` takes a few ms, and focus follows next tick. */
+/** Shows the panel after the renderer has committed the new content. The
+ *  renderer acks with panel:ready; the timer is a fallback for a slow paint. */
+function showPanelWindow(): void {
+  if (panelShowTimer) {
+    clearTimeout(panelShowTimer)
+    panelShowTimer = null
+  }
+  if (!panelShowPending || !panel) return
+  panelShowPending = false
+  if (panel.isMinimized()) panel.restore()
+  const started = PERF ? performance.now() : 0
+  if (!panel.isVisible()) panel.showInactive()
+  if (started) perf('panel reveal', Math.round(performance.now() - started))
+  setImmediate(() => {
+    if (!panel) return
+    panel.focus()
+  })
+}
+
+function schedulePanelShow(): void {
+  if (!panel || panel.isVisible()) return
+  panelShowPending = true
+  if (panelShowTimer) clearTimeout(panelShowTimer)
+  panelShowTimer = setTimeout(showPanelWindow, 120)
+}
+
+/** Shows an already-reset panel immediately (insert failures, second instance). */
 function revealPanel(): void {
   if (!panel) return
+  if (panelShowTimer) {
+    clearTimeout(panelShowTimer)
+    panelShowTimer = null
+  }
+  panelShowPending = false
   if (panel.isMinimized()) panel.restore()
   if (!panel.isVisible()) panel.showInactive()
   setImmediate(() => {
@@ -983,8 +1022,8 @@ function openPanel(
 ): void {
   if (!panel) return
   const started = PERF ? performance.now() : 0
-  revealPanel()
-  if (started) perf('panel reveal', Math.round(performance.now() - started))
+  const wasVisible = panel.isVisible()
+  if (panel.isMinimized()) panel.restore()
   if (!panel.webContents.isLoading()) {
     panel.webContents.send('panel:open', {
       action,
@@ -992,6 +1031,14 @@ function openPanel(
       image: extra.image,
       openHistory: extra.openHistory
     })
+  }
+  if (wasVisible) {
+    setImmediate(() => {
+      if (!panel) return
+      panel.focus()
+    })
+  } else {
+    schedulePanelShow()
   }
   if (started) {
     perf(`panel:open sent ${Math.round(performance.now() - started)}ms`, {
@@ -1480,8 +1527,17 @@ function bootstrap(): void {
     return listSessions()
   })
 
+  ipcMain.on('panel:ready', () => {
+    perf('panel:ready')
+    showPanelWindow()
+  })
   ipcMain.on('shot:complete', (_event, payload: ShotCompletePayload) => finishShot(payload))
   ipcMain.on('shot:cancel', () => cancelShot())
+  ipcMain.on('shot:hide', () => {
+    if (!shotActive) return
+    perf('shot early hide')
+    shot?.hide()
+  })
   ipcMain.on('panel:capture', () => {
     if (!shotActive) void startScreenshot(true)
   })
