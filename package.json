@@ -12,7 +12,8 @@
     "build": "npm run build:hook && electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit",
-    "mock": "node scripts/mock-openai.mjs"
+    "mock": "node scripts/mock-openai.mjs",
+    "dist": "npm run build && electron-builder --win nsis --publish never"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.1",
@@ -29,8 +30,10 @@
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
     "electron": "^44.7.0",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^6.0.0",
     "typescript": "^7.0.2",
     "vite": "^8.3.4"
-  }
+  },
+  "author": "hu-qi-jia"
 }

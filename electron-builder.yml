@@ -1,0 +1,45 @@
+appId: com.huqi.roulette
+productName: Roulette
+copyright: Copyright © 2026 hu-qi-jia
+directories:
+  output: dist
+  buildResources: resources
+files:
+  - out/**/*
+  - package.json
+  - '!**/*.map'
+  - '!node_modules/onnxruntime-node/bin/napi-v6/darwin/**'
+  - '!node_modules/onnxruntime-node/bin/napi-v6/linux/**'
+  - '!node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**'
+extraResources:
+  - from: native/mouse-hook/target/release/roulette-hook.exe
+    to: native/roulette-hook.exe
+  - from: resources
+    to: resources
+asar: true
+asarUnpack:
+  - node_modules/sqlite-vec/**
+  - node_modules/sqlite-vec-windows-x64/**
+  - node_modules/sherpa-onnx-node/**
+  - node_modules/sherpa-onnx-win-x64/**
+  - node_modules/onnxruntime-node/**
+  - node_modules/@huggingface/transformers/**
+npmRebuild: false
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: icon.ico
+  executableName: Roulette
+  artifactName: ${productName}-Setup-${version}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Roulette
+  installerIcon: icon.ico
+  uninstallerIcon: icon.ico
+  deleteAppDataOnUninstall: false

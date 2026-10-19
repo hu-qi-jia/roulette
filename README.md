@@ -4,9 +4,17 @@ Instant conversations, inserted anywhere. Windows 10/11.
 
 Roulette is a resident desktop app: hold a mouse gesture to open a radial menu, pick text / screenshot / voice, talk to your configured model, and insert the answer at the cursor of whatever app you were using.
 
+## Install
+
+Download the latest Windows installer from [GitHub Releases](https://github.com/hu-qi-jia/roulette/releases/latest):
+
+- `Roulette-Setup-<version>.exe` installs per user for Windows 10/11 x64.
+- The build is unsigned, so SmartScreen may show “Windows protected your PC”; choose **More info → Run anyway**.
+- Configure the OpenAI-compatible endpoint, API key, and models in Settings. Default triggers are hold `Alt` + right-click, `Ctrl+Shift+Space` for the click wheel, and `Ctrl+Alt+H` for history.
+
 ## Status
 
-M2–M4 done: wheel overlay, hold + click selection, panel, settings, the OpenAI-compatible streaming engine, cursor insertion, persistent history, screenshot capture, and offline voice input. A first version of the local knowledge base (v1.1) is also in place. A tray icon and a draggable floating launcher are in place too. Packaging is next.
+M2–M4 done: wheel overlay, hold + click selection, panel, settings, the OpenAI-compatible streaming engine, cursor insertion, persistent history, screenshot capture, and offline voice input. A first version of the local knowledge base (v1.1) is also in place. A tray icon and a draggable floating launcher are in place too. A Windows x64 installer is built with electron-builder and published on GitHub Releases.
 
 Pick 截图 on the wheel to freeze the display under the cursor, drag a region, and the crop opens in a new session; screenshots are attached to the turn, use the configured vision model, and stay available to follow-up turns. The composer's camera button captures into the current session instead.
 
@@ -35,7 +43,13 @@ npm run dev
 
 The dev command builds the native mouse hook first. Building it needs the Rust toolchain.
 
-Window and tray icons live in `resources/` (`icon.png`, `tray.png`). A packaged build needs to copy that folder into the app's resources directory.
+### Package an installer
+
+```bash
+npm run dist
+```
+
+This builds the hook and renderer, then produces `dist/Roulette-Setup-<version>.exe` with electron-builder. The native mouse hook is copied to `resources/native/roulette-hook.exe`, and `resources/` (window/tray icons) is copied into the app resources directory as configured in `electron-builder.yml`. Onnxruntime binaries for other platforms are excluded to keep the installer smaller; the native modules are unpacked from the asar so the local embedding and speech models can load.
 
 ### Renderer structure
 

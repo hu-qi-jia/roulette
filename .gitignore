@@ -7,3 +7,5 @@ spike/hook/target/
 *.log
 .env
 .perf/
+.eb-cache/
+.tmp/
