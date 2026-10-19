@@ -1,18 +1,33 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import './i18n'
-import './styles.css'
-import Overlay from './Overlay'
-import Panel from './Panel'
-import Shot from './Shot'
+import './styles/index.css'
 
 const params = new URLSearchParams(window.location.search)
 const windowParam = params.get('window')
 const route = windowParam === 'overlay' ? 'overlay' : windowParam === 'shot' ? 'shot' : 'panel'
 document.body.dataset.route = route
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    {route === 'overlay' ? <Overlay /> : route === 'shot' ? <Shot /> : <Panel />}
-  </React.StrictMode>
-)
+// Split by window so the overlay and shot windows do not parse the panel's
+// conversation, history, settings, and knowledge-base UI at startup.
+const loadRoute =
+  route === 'overlay'
+    ? import('./overlay/Overlay')
+    : route === 'shot'
+      ? import('./shot/Shot')
+      : import('./panel/Panel')
+
+const root = ReactDOM.createRoot(document.getElementById('root')!)
+
+void loadRoute
+  .then((module) => {
+    const Route = module.default
+    root.render(
+      <React.StrictMode>
+        <Route />
+      </React.StrictMode>
+    )
+  })
+  .catch((error) => {
+    console.error('[renderer] failed to load window UI', error)
+  })

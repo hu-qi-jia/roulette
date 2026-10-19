@@ -9,7 +9,7 @@ export interface EngineConfig {
 }
 
 const SYSTEM_PROMPT =
-  "You are a concise assistant. Answer in the same language as the user's latest message. Return plain text only."
+  "You are a concise assistant. Answer the user's question directly, in the same language as the user's latest message. Do not repeat reference material verbatim. Return plain text only."
 
 type OpenAiContent =
   | string
@@ -43,6 +43,9 @@ export async function* streamChat(
 ): AsyncGenerator<string, void, unknown> {
   const endpoint = `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`
 
+  const systemContent = config.systemContext
+    ? `${SYSTEM_PROMPT}\n\n${config.systemContext}`
+    : SYSTEM_PROMPT
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
@@ -53,10 +56,7 @@ export async function* streamChat(
       model: config.model,
       stream: true,
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        ...(config.systemContext
-          ? [{ role: 'system', content: config.systemContext }]
-          : []),
+        { role: 'system', content: systemContent },
         ...messages.map(toOpenAiMessage)
       ]
     }),

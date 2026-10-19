@@ -5,6 +5,7 @@ import {
   addKbDocument,
   closeStore,
   deleteKbDocument,
+  hasKbChunks,
   kbStats,
   listKbDocuments,
   openStore,
@@ -24,6 +25,7 @@ const vec = (pairs) => {
 }
 
 assert.equal(openStore(file), true)
+assert.equal(hasKbChunks(), false, 'an empty index has no chunks')
 
 const cats = addKbDocument({
   title: 'Cats',
@@ -33,6 +35,7 @@ const cats = addKbDocument({
 })
 assert.ok(cats)
 assert.equal(cats.chunkCount, 2)
+assert.equal(hasKbChunks(), true)
 
 const roulette = addKbDocument({
   title: 'Roulette',

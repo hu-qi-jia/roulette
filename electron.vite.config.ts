@@ -9,6 +9,11 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()]
   },
   renderer: {
-    plugins: [react()]
+    plugins: [react()],
+    build: {
+      // electron-vite defaults minify to false; the unminified renderer bundle
+      // is parsed by three windows at startup.
+      minify: 'oxc'
+    }
   }
 })

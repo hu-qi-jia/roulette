@@ -4,7 +4,7 @@ import { app } from 'electron'
 import type { KbDocumentSummary, KbStatus, KbSource } from '../shared/types'
 import {
   addKbDocument,
-  kbStats,
+  hasKbChunks,
   searchKb,
   setKbMeta
 } from './store'
@@ -89,6 +89,7 @@ async function loadExtractor(): Promise<Extractor> {
   progress.ratio = 0
   emitStatus()
 
+  let lastProgressEmit = 0
   loading = (async () => {
     const mod = (await import('@huggingface/transformers')) as unknown as {
       env: Record<string, unknown>
@@ -117,7 +118,12 @@ async function loadExtractor(): Promise<Extractor> {
           progress.ratio = progress.totalBytes
             ? Math.min(1, progress.receivedBytes / progress.totalBytes)
             : 0
-          emitStatus()
+          // The downloader reports every chunk; throttle the IPC status push.
+          const now = Date.now()
+          if (now - lastProgressEmit >= 100) {
+            lastProgressEmit = now
+            emitStatus()
+          }
         } else if (event.status === 'done') {
           progress.downloading = false
           emitStatus()
@@ -288,7 +294,7 @@ export async function ingestFiles(files: string[]): Promise<KbDocumentSummary[]>
 export async function retrieveKb(query: string, limit = 5): Promise<KbSource[]> {
   try {
     if (!query.trim() || !isEmbeddingModelInstalled()) return []
-    if (kbStats().chunks === 0) return []
+    if (!hasKbChunks()) return []
 
     const vector = await embedQuery(query)
     return searchKb(vector, limit)

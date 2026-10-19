@@ -9,7 +9,8 @@ import {
   getMessages,
   getSession,
   listSessions,
-  openStore
+  openStore,
+  sessionHasImages
 } from '../src/main/store.ts'
 
 const dir = path.join(process.cwd(), 'out', 'store-test')
@@ -32,6 +33,7 @@ appendMessage('s1', 'assistant', 'hi there')
 await sleep(5)
 ensureSession({ id: 's2', kind: 'screenshot', appName: null })
 appendMessage('s2', 'user', 'describe this')
+assert.equal(sessionHasImages('s2'), false, 'text-only sessions carry no image')
 
 const list = listSessions()
 assert.equal(list.length, 2)
@@ -67,7 +69,9 @@ assert.equal(appendMessage('s1', 'assistant', 'late'), null)
 // Deleting a session reports the image files that belonged to it.
 ensureSession({ id: 's3', kind: 'screenshot', appName: null })
 appendMessage('s3', 'user', 'look', 'C:/tmp/shot.jpg')
+assert.equal(sessionHasImages('s3'), true, 'image messages are detected without decoding')
 assert.deepEqual(deleteSession('s3'), ['C:/tmp/shot.jpg'])
+assert.equal(sessionHasImages('s3'), false)
 
 // History survives a restart.
 closeStore()

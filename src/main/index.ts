@@ -27,7 +27,7 @@ import {
   setKbProgressSink
 } from './kb'
 import { streamChat } from './engine'
-import { getApiKey, getPublicSettings, saveSettings, setKbEnabled } from './settings'
+import { getApiKey, getPublicSettings, saveSettings } from './settings'
 import {
   appendMessage,
   closeStore,
@@ -39,7 +39,8 @@ import {
   listKbDocuments,
   listSessions,
   openStore,
-  renameSession
+  renameSession,
+  sessionHasImages
 } from './store'
 import {
   createOverlayWindow,
@@ -59,14 +60,27 @@ import type {
   ShotCompletePayload,
   ShotDisplay,
   ShotShowPayload,
+  StoredMessage,
   TranscribeRequest,
-  WheelMode
+  WheelMode,
+  WheelResult
 } from '../shared/types'
 
 const DEAD_ZONE = 76
 const CLICK_SHORTCUTS = ['Control+Shift+Space', 'Alt+Shift+Space', 'Control+Alt+R']
 const HISTORY_SHORTCUTS = ['Control+Alt+H', 'Alt+Shift+H']
 const SHOT_ESCAPE = 'Escape'
+
+// Set ROULETTE_PERF=1 to log startup and pipeline timings to the console.
+const PERF = process.env.ROULETTE_PERF === '1'
+const PERF_ORIGIN = performance.now()
+
+function perf(label: string, detail?: unknown): void {
+  if (!PERF) return
+  const elapsed = Math.round(performance.now() - PERF_ORIGIN)
+  if (detail === undefined) console.log(`[perf] ${label}: ${elapsed}ms`)
+  else console.log(`[perf] ${label}: ${elapsed}ms`, detail)
+}
 
 // Dev-only: feed a WAV file to getUserMedia so the voice flow can be tested
 // on machines without a microphone.
@@ -98,6 +112,7 @@ let targetHwnd = 0
 let shotActive = false
 let shotFromPanel = false
 let pendingShot: ShotShowPayload | null = null
+let lastWheelHovered: WheelResult | null = null
 const activeChats = new Map<string, AbortController>()
 
 function toDip(x: number, y: number): { x: number; y: number } {
@@ -180,25 +195,61 @@ function saveImage(dataUrl: string): string | null {
   }
 }
 
+const IMAGE_CACHE_MAX_ENTRIES = 8
+const IMAGE_CACHE_MAX_CHARS = 24 * 1024 * 1024
+const imageDataCache = new Map<string, { dataUrl: string; size: number }>()
+let imageDataCacheSize = 0
+
+/** Chat images are written once under a unique name, so a small bounded LRU
+ *  avoids re-reading and re-encoding them on every follow-up turn. */
 function readImageDataUrl(file: string): string | null {
+  const cached = imageDataCache.get(file)
+  if (cached) {
+    imageDataCache.delete(file)
+    imageDataCache.set(file, cached)
+    return cached.dataUrl
+  }
   try {
     const ext = path.extname(file).slice(1).toLowerCase()
     const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg'
-    return `data:${mime};base64,${fs.readFileSync(file).toString('base64')}`
+    const dataUrl = `data:${mime};base64,${fs.readFileSync(file).toString('base64')}`
+    imageDataCache.set(file, { dataUrl, size: dataUrl.length })
+    imageDataCacheSize += dataUrl.length
+    while (
+      imageDataCache.size > IMAGE_CACHE_MAX_ENTRIES ||
+      imageDataCacheSize > IMAGE_CACHE_MAX_CHARS
+    ) {
+      const oldest = imageDataCache.keys().next().value
+      if (oldest === undefined) break
+      const entry = imageDataCache.get(oldest)
+      imageDataCache.delete(oldest)
+      imageDataCacheSize -= entry?.size ?? 0
+    }
+    return dataUrl
   } catch {
     return null
   }
 }
 
-function storedHistory(sessionId: string): ChatMessage[] {
-  return getMessages(sessionId).map((message) => {
+function toChatHistory(messages: StoredMessage[]): ChatMessage[] {
+  const started = PERF ? performance.now() : 0
+  let images = 0
+  const history = messages.map((message) => {
     const image = message.imagePath ? readImageDataUrl(message.imagePath) : null
+    if (image) images += 1
     return {
       role: message.role,
       content: message.content,
       images: image ? [image] : undefined
     }
   })
+  if (PERF && images > 0) {
+    perf(
+      'chat history',
+      `messages=${messages.length} images=${images} ${Math.round(performance.now() - started)}ms`
+    )
+  }
+  return history
 }
 
 async function handleChat(request: ChatRequest): Promise<void> {
@@ -218,9 +269,10 @@ async function handleChat(request: ChatRequest): Promise<void> {
   if (!text) return
 
   // A screenshot session keeps using the vision model for follow-up turns,
-  // because the earlier turn still carries its image.
-  const existing = storedHistory(request.sessionId)
-  const needsVision = Boolean(request.image) || existing.some((m) => m.images?.length)
+  // because the earlier turn still carries its image. Check the stored path
+  // first so this does not decode every image twice.
+  const needsVision =
+    Boolean(request.image) || sessionHasImages(request.sessionId)
   const model = needsVision ? settings.visionModel : settings.textModel
   if (!model) {
     emitChatError(
@@ -248,7 +300,7 @@ async function handleChat(request: ChatRequest): Promise<void> {
   appendMessage(request.sessionId, 'user', text, imagePath)
   // The store is the single source of truth for the conversation, so a resumed
   // session can continue with its full history.
-  const history = storedHistory(request.sessionId)
+  const history = toChatHistory(getMessages(request.sessionId))
 
   let sources: KbSource[] = []
   if (settings.kbEnabled) {
@@ -264,6 +316,21 @@ async function handleChat(request: ChatRequest): Promise<void> {
   activeChats.set(request.sessionId, controller)
   let received = 0
   let output = ''
+  // Providers emit tokens much faster than a screen refresh. Coalesce deltas
+  // into one IPC message per frame so the renderer does not re-render the
+  // conversation for every token.
+  let pendingDelta = ''
+  let flushTimer: NodeJS.Timeout | null = null
+  const flushDelta = (): void => {
+    if (flushTimer) {
+      clearTimeout(flushTimer)
+      flushTimer = null
+    }
+    if (!pendingDelta) return
+    const delta = pendingDelta
+    pendingDelta = ''
+    sendToPanel('chat:delta', { sessionId: request.sessionId, delta })
+  }
 
   try {
     console.log('[chat] start', request.sessionId, 'turns:', history.length, 'model:', model)
@@ -274,8 +341,10 @@ async function handleChat(request: ChatRequest): Promise<void> {
     )) {
       received += delta.length
       output += delta
-      sendToPanel('chat:delta', { sessionId: request.sessionId, delta })
+      pendingDelta += delta
+      if (!flushTimer) flushTimer = setTimeout(flushDelta, 16)
     }
+    flushDelta()
     console.log('[chat] done', request.sessionId, 'chars:', received)
     sendToPanel('chat:done', { sessionId: request.sessionId, sources })
     if (panel) captureIfRequested(panel, 'out/chat-capture.png')
@@ -283,6 +352,16 @@ async function handleChat(request: ChatRequest): Promise<void> {
       void insertText(output)
     }
   } catch (error) {
+    // A newer request for this session already owns the UI; drop its buffer.
+    if (activeChats.get(request.sessionId) !== controller) {
+      pendingDelta = ''
+      if (flushTimer) {
+        clearTimeout(flushTimer)
+        flushTimer = null
+      }
+    } else {
+      flushDelta()
+    }
     console.warn('[chat] error', error)
     if (panel) captureIfRequested(panel, 'out/chat-error-capture.png')
     if (controller.signal.aborted) {
@@ -295,11 +374,18 @@ async function handleChat(request: ChatRequest): Promise<void> {
       )
     }
   } finally {
+    if (flushTimer) {
+      clearTimeout(flushTimer)
+      flushTimer = null
+    }
     // A newer request for the same session already replaced this one; its
     // partial output must not land after the newer user message.
     const active = activeChats.get(request.sessionId)
     const superseded = active !== undefined && active !== controller
-    if (active === controller) activeChats.delete(request.sessionId)
+    if (active === controller) {
+      flushDelta()
+      activeChats.delete(request.sessionId)
+    }
     // Keep partial output on cancellation so a resumed session stays coherent.
     if (output.trim() && !superseded) {
       const meta = sources.length > 0 ? JSON.stringify({ sources }) : null
@@ -312,7 +398,7 @@ function buildKbContext(sources: KbSource[]): string {
   const lines = sources.map(
     (source, index) => `[${index + 1}] ${source.title}\n${source.snippet}`
   )
-  return `Use the following passages from the user's local knowledge base when they are relevant. Cite them as [1], [2], etc. Do not invent information that is not present in the passages.\n\n${lines.join('\n\n')}`
+  return `The passages below come from the user's local knowledge base. They are reference material, not the answer. Answer the user's question directly and concisely by synthesizing the relevant information in your own words. Do not copy, list, or restate the passages wholesale, and do not include unrelated background. Cite supporting passages as [1], [2], etc. If the passages do not contain the answer, say so.\n\n${lines.join('\n\n')}`
 }
 
 // Electron 44's async clipboard API refuses to write ClipboardItems returned by
@@ -389,7 +475,7 @@ async function insertText(text: string): Promise<void> {
     if (!hook.isRunning()) {
       console.warn('[insert] hook is not running; copying instead')
       await clipboard.writeText(text)
-      panel?.show()
+      revealPanel()
       sendToPanel('insert:failed')
       return
     }
@@ -427,7 +513,7 @@ async function insertText(text: string): Promise<void> {
     console.log('[insert] command sent:', command, sent)
     if (!sent) {
       await clipboard.writeText(text)
-      panel?.show()
+      revealPanel()
       sendToPanel('insert:failed')
       return
     }
@@ -441,7 +527,7 @@ async function insertText(text: string): Promise<void> {
     if (!result || result.type !== 'paste-result' || !result.ok) {
       // Keep the text on the clipboard and tell the user to paste manually.
       await clipboard.writeText(text)
-      panel?.show()
+      revealPanel()
       sendToPanel('insert:failed')
       return
     }
@@ -457,7 +543,7 @@ async function insertText(text: string): Promise<void> {
   } catch (error) {
     console.error('[insert] failed', error)
     await clipboard.writeText(text).catch(() => {})
-    panel?.show()
+    revealPanel()
     sendToPanel('insert:failed')
   }
 }
@@ -544,7 +630,7 @@ function maybeRunHistoryTest(): void {
 
 function showWheel(nextMode: WheelMode, at: { x: number; y: number }): void {
   if (!overlay) return
-  if (panel?.isVisible()) {
+  if (panel?.isVisible() && !panel.isMinimized()) {
     panel.focus()
     return
   }
@@ -552,6 +638,7 @@ function showWheel(nextMode: WheelMode, at: { x: number; y: number }): void {
   active = true
   mode = nextMode
   center = at
+  lastWheelHovered = null
   try {
     wheelOrigin = screen.dipToScreenPoint({ x: at.x, y: at.y })
   } catch {
@@ -592,7 +679,9 @@ function showWheel(nextMode: WheelMode, at: { x: number; y: number }): void {
 function hideWheel(): void {
   active = false
   if (!overlay) return
+  const started = PERF ? performance.now() : 0
   overlay.hide()
+  if (started) perf('overlay.hide()', Math.round(performance.now() - started))
   overlay.setIgnoreMouseEvents(true, { forward: true })
   overlay.setFocusable(false)
 }
@@ -609,10 +698,12 @@ function finishSelection(result: Sector | 'cancel'): void {
   }
   sendToOverlay('wheel:result', result)
   hideTimer = setTimeout(() => {
-    hideWheel()
+    // Show the panel before hiding the wheel: the panel's first paint then
+    // happens under the wheel instead of leaving a blank frame on screen.
     if (result === 'history') openPanel('text', { openHistory: true })
     else if (result !== 'cancel') openPanel(result)
-  }, 280)
+    hideWheel()
+  }, 200)
 }
 
 function sendShotShow(payload: ShotShowPayload): void {
@@ -688,7 +779,12 @@ async function captureWithHook(displays: Display[]): Promise<ShotDisplay[] | nul
         id: item.display.id,
         bounds: item.display.bounds,
         scaleFactor: item.display.scaleFactor,
-        image: new Uint8Array(bytes),
+        // View the Buffer instead of copying it: a 4K BMP is ~33 MB.
+        image: new Uint8Array(
+          bytes.buffer as ArrayBuffer,
+          bytes.byteOffset,
+          bytes.byteLength
+        ),
         imageMime: 'image/bmp',
         imageSize: { width: item.rect.width, height: item.rect.height }
       })
@@ -738,7 +834,11 @@ async function captureWithDesktopCapturer(displays: Display[]): Promise<ShotDisp
         id: display.id,
         bounds: display.bounds,
         scaleFactor: display.scaleFactor,
-        image: new Uint8Array(encoded),
+        image: new Uint8Array(
+          encoded.buffer as ArrayBuffer,
+          encoded.byteOffset,
+          encoded.byteLength
+        ),
         imageMime: 'image/jpeg',
         imageSize: image.getSize()
       }
@@ -756,10 +856,14 @@ async function startScreenshot(fromPanel: boolean): Promise<void> {
   const startedAt = Date.now()
 
   try {
+    let step = PERF ? performance.now() : 0
     if (fromPanel) panel?.hide()
+    if (step) perf('panel.hide()', Math.round(performance.now() - step))
+    step = PERF ? performance.now() : 0
     hideWheel()
+    if (step) perf('hideWheel', Math.round(performance.now() - step))
     // Let the compositor drop the wheel/panel before grabbing the screen.
-    await delay(220)
+    await delay(80)
 
     const point = screen.getCursorScreenPoint()
     const display = screen.getDisplayNearestPoint(point)
@@ -780,8 +884,10 @@ async function startScreenshot(fromPanel: boolean): Promise<void> {
     if (captures.length === 0) throw new Error('No screen source returned an image.')
 
     shot.setBounds(virtual)
+    const showStarted = PERF ? performance.now() : 0
     shot.show()
     shot.focus()
+    if (showStarted) perf('shot.show()+focus', Math.round(performance.now() - showStarted))
     // If another always-on-top window steals focus, the renderer never sees
     // Escape; a temporary global shortcut keeps cancel working regardless.
     if (!globalShortcut.isRegistered(SHOT_ESCAPE)) {
@@ -810,8 +916,7 @@ async function startScreenshot(fromPanel: boolean): Promise<void> {
     shotFromPanel = false
     if (globalShortcut.isRegistered(SHOT_ESCAPE)) globalShortcut.unregister(SHOT_ESCAPE)
     if (fromPanel) {
-      panel?.show()
-      panel?.focus()
+      revealPanel()
     }
   }
 }
@@ -819,7 +924,9 @@ async function startScreenshot(fromPanel: boolean): Promise<void> {
 function finishShot(payload: ShotCompletePayload): void {
   if (!shotActive) return
   shotActive = false
+  const hideStarted = PERF ? performance.now() : 0
   shot?.hide()
+  if (hideStarted) perf('shot.hide()', Math.round(performance.now() - hideStarted))
   if (globalShortcut.isRegistered(SHOT_ESCAPE)) globalShortcut.unregister(SHOT_ESCAPE)
 
   const fromPanel = shotFromPanel
@@ -830,9 +937,15 @@ function finishShot(payload: ShotCompletePayload): void {
   console.log('[shot] selected', payload.width, 'x', payload.height, 'fromPanel:', fromPanel)
 
   if (fromPanel) {
-    panel?.show()
-    panel?.focus()
+    const started = PERF ? performance.now() : 0
+    revealPanel()
+    if (started) perf('panel reveal', Math.round(performance.now() - started))
     sendToPanel('panel:attach', { image: payload.image })
+    if (started) {
+      perf(`panel:attach sent ${Math.round(performance.now() - started)}ms`, {
+        imageChars: payload.image.length
+      })
+    }
     if (panel) captureIfRequested(panel, 'out/panel-attach-capture.png')
     return
   }
@@ -847,9 +960,21 @@ function cancelShot(): void {
   console.log('[shot] cancelled')
   if (shotFromPanel) {
     shotFromPanel = false
-    panel?.show()
-    panel?.focus()
+    revealPanel()
   }
+}
+
+/** Maps the panel immediately without paying the foreground-activation cost
+ *  before its first paint. `show()` blocks the main process for ~45 ms on
+ *  Windows; `showInactive()` takes a few ms, and focus follows next tick. */
+function revealPanel(): void {
+  if (!panel) return
+  if (panel.isMinimized()) panel.restore()
+  if (!panel.isVisible()) panel.showInactive()
+  setImmediate(() => {
+    if (!panel) return
+    panel.focus()
+  })
 }
 
 function openPanel(
@@ -857,14 +982,20 @@ function openPanel(
   extra: { image?: string; openHistory?: boolean } = {}
 ): void {
   if (!panel) return
-  panel.show()
-  panel.focus()
+  const started = PERF ? performance.now() : 0
+  revealPanel()
+  if (started) perf('panel reveal', Math.round(performance.now() - started))
   if (!panel.webContents.isLoading()) {
     panel.webContents.send('panel:open', {
       action,
       kind: KIND_BY_SECTOR[action],
       image: extra.image,
       openHistory: extra.openHistory
+    })
+  }
+  if (started) {
+    perf(`panel:open sent ${Math.round(performance.now() - started)}ms`, {
+      imageChars: extra.image?.length ?? 0
     })
   }
   captureIfRequested(panel, 'out/panel-capture.png')
@@ -879,16 +1010,24 @@ function openPanel(
   maybeRunKbOpenTest()
 }
 
-// Dev-only: clicks the knowledge-base button and captures the modal.
+// Dev-only: clicks the knowledge-base button and captures the page.
 function maybeRunKbOpenTest(): void {
   if (process.env.ROULETTE_TEST_KB_OPEN !== '1' || !panel) return
+  const openCreate = process.env.ROULETTE_TEST_KB_CREATE === '1'
   setTimeout(() => {
     panel?.webContents
       .executeJavaScript(
-        `(() => {
+        `(async () => {
           const button = document.querySelector('.kb-button');
           if (!(button instanceof HTMLButtonElement)) return 'no-button';
           button.click();
+          ${
+            openCreate
+              ? `await new Promise((resolve) => setTimeout(resolve, 500));
+                 const create = document.querySelector('.kb-secondary');
+                 if (create instanceof HTMLButtonElement) create.click();`
+              : ''
+          }
           return 'clicked';
         })()`
       )
@@ -1009,7 +1148,7 @@ function maybeRunSettingsTest(): void {
           if (!(button instanceof HTMLButtonElement)) return 'no-button';
           button.click();
           await new Promise((resolve) => setTimeout(resolve, 250));
-          const save = document.querySelector('.settings-modal .primary');
+          const save = document.querySelector('.settings-page .save');
           return {
             clicked: true,
             saveDisabled: save instanceof HTMLButtonElement ? save.disabled : null
@@ -1038,10 +1177,10 @@ function maybeRunSettingsTest(): void {
         panel?.webContents
           .executeJavaScript(
             `(async () => {
-              const toggle = document.querySelector('.switch');
+              const toggle = document.querySelector('.settings-page .switch');
               if (toggle instanceof HTMLButtonElement) toggle.click();
               await new Promise((resolve) => setTimeout(resolve, 200));
-              const save = document.querySelector('.settings-modal .primary');
+              const save = document.querySelector('.settings-page .save');
               if (save instanceof HTMLButtonElement) save.click();
               return 'saved';
             })()`
@@ -1127,10 +1266,15 @@ function onHookEvent(ev: HookEvent): void {
       const p = toDip(ev.x, ev.y)
       const dx = p.x - center.x
       const dy = p.y - center.y
-      sendToOverlay('wheel:move', {
-        angle: ((Math.atan2(dy, dx) * 180) / Math.PI + 360) % 360,
-        distance: Math.hypot(dx, dy)
-      })
+      const distance = Math.hypot(dx, dy)
+      const angle = ((Math.atan2(dy, dx) * 180) / Math.PI + 360) % 360
+      const hovered: WheelResult =
+        distance < DEAD_ZONE ? 'cancel' : sectorForAngle(angle)
+      // The wheel only reacts to the hovered sector, so skip the IPC round trip
+      // for the ~60 moves/s that stay inside one sector.
+      if (hovered === lastWheelHovered) break
+      lastWheelHovered = hovered
+      sendToOverlay('wheel:move', { angle, distance })
       break
     }
 
@@ -1168,13 +1312,19 @@ function configurePermissions(): void {
   )
 }
 
-function bootstrap(): void {  if (!openStore(path.join(app.getPath('userData'), 'roulette.db'))) {
+function bootstrap(): void {
+  perf('bootstrap')
+  if (!openStore(path.join(app.getPath('userData'), 'roulette.db'))) {
     console.warn('[store] history is disabled for this run')
   }
+  perf('store open')
 
   overlay = createOverlayWindow()
+  perf('overlay window created')
   panel = createPanelWindow()
+  perf('panel window created')
   shot = createShotWindow()
+  perf('shot window created')
 
   configurePermissions()
   setKbProgressSink((status) => sendToPanel('kb:progress', status))
@@ -1195,20 +1345,19 @@ function bootstrap(): void {  if (!openStore(path.join(app.getPath('userData'), 
       }))
     )
   )
+  perf('display enumerated')
 
-  // Warm the screen-capture pipeline so the first screenshot opens faster.
-  void desktopCapturer
-    .getSources({
-      types: ['screen'],
-      thumbnailSize: { width: 1, height: 1 },
-      fetchWindowIcons: false
-    })
-    .catch(() => {})
-
-  overlay.webContents.on('did-finish-load', () => console.log('[overlay] ready'))
-  panel.webContents.on('did-finish-load', () => console.log('[panel] ready'))
+  overlay.webContents.on('did-finish-load', () => {
+    console.log('[overlay] ready')
+    perf('overlay ready')
+  })
+  panel.webContents.on('did-finish-load', () => {
+    console.log('[panel] ready')
+    perf('panel ready')
+  })
   shot.webContents.on('did-finish-load', () => {
     console.log('[shot] ready')
+    perf('shot ready')
     if (pendingShot) {
       shot?.webContents.send('shot:show', pendingShot)
       pendingShot = null
@@ -1230,6 +1379,7 @@ function bootstrap(): void {  if (!openStore(path.join(app.getPath('userData'), 
   if (!hook.start(hookPath())) {
     console.warn('[hook] running without global mouse trigger')
   }
+  perf('hook started')
 
   const toggleClickWheel = (): void => {
     if (active) {
@@ -1251,7 +1401,7 @@ function bootstrap(): void {  if (!openStore(path.join(app.getPath('userData'), 
 
   const openHistoryPanel = (): void => {
     console.log('[shortcut] history panel')
-    if (panel?.isVisible()) {
+    if (panel?.isVisible() && !panel.isMinimized()) {
       sendToPanel('panel:history')
       panel.focus()
       return
@@ -1276,6 +1426,7 @@ function bootstrap(): void {  if (!openStore(path.join(app.getPath('userData'), 
     activeChats.clear()
     panel?.hide()
   })
+  ipcMain.on('panel:minimize', () => panel?.minimize())
   ipcMain.on('clipboard:write', (_event, text: string) => {
     void clipboard.writeText(String(text))
   })
@@ -1387,9 +1538,6 @@ function bootstrap(): void {  if (!openStore(path.join(app.getPath('userData'), 
     deleteKbDocument(Number(id))
     return listKbDocuments()
   })
-  ipcMain.handle('kb:set-enabled', (_event, enabled: boolean) =>
-    setKbEnabled(Boolean(enabled))
-  )
 
   ipcMain.on('chat:start', (_event, request: ChatRequest) => {
     void handleChat(request)
@@ -1397,13 +1545,14 @@ function bootstrap(): void {  if (!openStore(path.join(app.getPath('userData'), 
   ipcMain.on('chat:cancel', (_event, sessionId: string) => {
     activeChats.get(sessionId)?.abort()
   })
+  perf('bootstrap done')
 }
 
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   app.on('second-instance', () => {
-    if (panel?.isVisible()) panel.focus()
+    revealPanel()
   })
 
   app.whenReady().then(bootstrap)

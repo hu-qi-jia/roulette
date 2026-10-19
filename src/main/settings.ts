@@ -108,10 +108,3 @@ export function saveSettings(input: SettingsInput): AppSettings {
   writeStored(stored)
   return getPublicSettings()
 }
-
-export function setKbEnabled(enabled: boolean): AppSettings {
-  const stored = loadStored()
-  stored.kbEnabled = enabled
-  writeStored(stored)
-  return getPublicSettings()
-}

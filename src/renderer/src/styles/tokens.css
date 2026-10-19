@@ -1,0 +1,62 @@
+@font-face {
+  font-family: 'Geist';
+  src: url('../assets/fonts/geist-latin.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('../assets/fonts/geist-mono-latin.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: light;
+
+  --paper: #f1efe6;
+  --card: #fbf9f2;
+  --surface: #ffffff;
+  --ink: #131313;
+  --muted: #6b6860;
+  --dim: #9b978c;
+  --line: #d9d5c9;
+  --line-strong: #bfbaac;
+  --line-card: #d3cfc0;
+
+  --blue: #2440ff;
+  --blue-deep: #1a33e0;
+  --acid: #e8ff4a;
+  --acid-light: #f2ff7a;
+  --coral: #ff5a3c;
+  --green: #3f8f5f;
+
+  --dark: #141414;
+  --dark-raise: #232323;
+  --dark-line: #2b2b2b;
+  --dark-text: #f3f1ea;
+  --dark-muted: #9c9a92;
+  --dark-dim: #77756e;
+
+  --sans: 'Geist', 'Noto Sans SC', 'Segoe UI Variable Text', 'Segoe UI',
+    'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, sans-serif;
+  --mono: 'Geist Mono', 'Cascadia Code', Consolas, 'Microsoft YaHei', monospace;
+
+  /* Type scale: 14px body, 12px label, 11px caption. */
+  --text-caption: 11px;
+  --text-label: 12px;
+  --text-body: 14px;
+  --text-title: 14.5px;
+  --text-page: 24px;
+  --text-display: 30px;
+
+  /* Icon scale: 20px in toolbars, 16px inline. */
+  --icon-sm: 16px;
+  --icon-md: 20px;
+  --icon-lg: 22px;
+
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+}

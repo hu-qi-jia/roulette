@@ -443,8 +443,11 @@ fn start_stdin_reader() {
                         .and_then(|value| value.parse::<usize>().ok())
                         .unwrap_or(0);
                     let mut items = Vec::new();
+                    let mut errors = Vec::new();
                     for _ in 0..count {
-                        let id = parts.next().and_then(|value| value.parse::<i32>().ok());
+                        // Electron display IDs are unsigned 32-bit values; on
+                        // some systems they exceed i32::MAX (e.g. 2733337434).
+                        let id = parts.next().and_then(|value| value.parse::<u32>().ok());
                         let x = parts.next().and_then(|value| value.parse::<i32>().ok());
                         let y = parts.next().and_then(|value| value.parse::<i32>().ok());
                         let w = parts.next().and_then(|value| value.parse::<i32>().ok());
@@ -453,13 +456,18 @@ fn start_stdin_reader() {
                             (Some(id), Some(x), Some(y), Some(w), Some(h)) => {
                                 items.push((id, x, y, w, h))
                             }
-                            _ => break,
+                            _ => {
+                                errors.push("invalid capture item".to_string());
+                                break;
+                            }
                         }
+                    }
+                    if count == 0 {
+                        errors.push("no capture items".to_string());
                     }
 
                     let out_dir = std::env::temp_dir().join("roulette-captures");
                     let _ = fs::create_dir_all(&out_dir);
-                    let mut errors = Vec::new();
                     for (id, x, y, w, h) in &items {
                         let path = out_dir.join(format!("{}.bmp", id));
                         let started = Instant::now();

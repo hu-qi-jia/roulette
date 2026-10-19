@@ -43,6 +43,7 @@ const api: RouletteApi = {
   selectSector: (sector: Sector) => ipcRenderer.send('wheel:select', sector),
   cancelWheel: () => ipcRenderer.send('wheel:cancel'),
   closePanel: () => ipcRenderer.send('panel:close'),
+  minimizePanel: () => ipcRenderer.send('panel:minimize'),
   copyText: (text: string) => ipcRenderer.send('clipboard:write', text),
   insertText: (text: string) => ipcRenderer.send('panel:insert', text),
   onInsertFailed: (cb) => {
@@ -92,8 +93,6 @@ const api: RouletteApi = {
     ipcRenderer.invoke('kb:add-files') as Promise<KbDocumentSummary[]>,
   deleteKbDocument: (id: number) =>
     ipcRenderer.invoke('kb:delete', id) as Promise<KbDocumentSummary[]>,
-  setKbEnabled: (enabled: boolean) =>
-    ipcRenderer.invoke('kb:set-enabled', enabled) as Promise<AppSettings>,
   onKbProgress: (cb) => subscribe<KbStatus>('kb:progress', cb),
   onKbIngestProgress: (cb) => subscribe<KbIngestProgress>('kb:ingest', cb),
   onTestStopRecording: (cb) => subscribe<void>('test:stop-recording', cb)

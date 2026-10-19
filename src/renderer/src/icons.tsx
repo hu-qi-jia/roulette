@@ -1,5 +1,4 @@
 import type { JSX, ReactNode } from 'react'
-import type { SessionKind } from '../../shared/types'
 
 export function IconBase({
   children,
@@ -15,7 +14,7 @@ export function IconBase({
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth="1.7"
+      strokeWidth="1.8"
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden="true"
@@ -25,10 +24,10 @@ export function IconBase({
   )
 }
 
-export function ChatIcon({ size = 18 }: { size?: number }): JSX.Element {
+export function TextIcon({ size = 18 }: { size?: number }): JSX.Element {
   return (
     <IconBase size={size}>
-      <path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7A2.5 2.5 0 0 1 17.5 16H10l-4.5 4v-4.2A2.5 2.5 0 0 1 4 13.5Z" />
+      <path d="M5 6h14M12 6v13M8 19h8" />
     </IconBase>
   )
 }
@@ -57,6 +56,22 @@ export function CloseIcon({ size = 18 }: { size?: number }): JSX.Element {
   return (
     <IconBase size={size}>
       <path d="M6.5 6.5l11 11M17.5 6.5l-11 11" />
+    </IconBase>
+  )
+}
+
+export function MinimizeIcon({ size = 18 }: { size?: number }): JSX.Element {
+  return (
+    <IconBase size={size}>
+      <path d="M5 12h14" />
+    </IconBase>
+  )
+}
+
+export function BackIcon({ size = 18 }: { size?: number }): JSX.Element {
+  return (
+    <IconBase size={size}>
+      <path d="M15 5l-7 7 7 7" />
     </IconBase>
   )
 }
@@ -96,28 +111,20 @@ export function ArrowUpIcon({ size = 18 }: { size?: number }): JSX.Element {
   )
 }
 
+export function ArrowRightIcon({ size = 18 }: { size?: number }): JSX.Element {
+  return (
+    <IconBase size={size}>
+      <path d="M5 12h14M13 6l6 6-6 6" />
+    </IconBase>
+  )
+}
+
 export function StopIcon(): JSX.Element {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
       <rect x="7" y="7" width="10" height="10" rx="2" />
     </svg>
   )
-}
-
-export function KindIcon({ kind }: { kind: SessionKind }): JSX.Element {
-  if (kind === 'screenshot') {
-    return (
-      <IconBase size={15}>
-        <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" />
-        <circle cx="9" cy="10" r="1.6" />
-        <path d="M4.5 17l4.2-4 3.3 3 2.6-2.4 4.4 4.4" />
-      </IconBase>
-    )
-  }
-  if (kind === 'voice') {
-    return <MicIcon size={15} />
-  }
-  return <ChatIcon size={15} />
 }
 
 export function SearchIcon({ size = 16 }: { size?: number }): JSX.Element {
@@ -165,26 +172,5 @@ export function EyeOffIcon({ size = 18 }: { size?: number }): JSX.Element {
       <path d="M6.5 6.7A16.7 16.7 0 0 0 2.5 12s3.5 6 9.5 6a9.9 9.9 0 0 0 4.4-1" />
       <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
     </IconBase>
-  )
-}
-
-export function WheelMark({ size = 22 }: { size?: number }): JSX.Element {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
-      <circle
-        cx="12"
-        cy="12"
-        r="9.2"
-        fill="none"
-        stroke="rgba(255,255,255,0.55)"
-        strokeWidth="1.4"
-      />
-      <path
-        d="M12 2.8v18.4M2.8 12h18.4"
-        stroke="rgba(255,255,255,0.45)"
-        strokeWidth="1.1"
-      />
-      <circle cx="12" cy="12" r="3.1" fill="#22c55e" />
-    </svg>
   )
 }

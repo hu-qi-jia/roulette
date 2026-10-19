@@ -197,6 +197,18 @@ export function getMessages(sessionId: string): StoredMessage[] {
     .all(sessionId) as unknown as StoredMessage[]
 }
 
+/** Whether a session already carries an image, without loading its history. */
+export function sessionHasImages(sessionId: string): boolean {
+  if (!db) return false
+  return (
+    db
+      .prepare(
+        'SELECT 1 AS ok FROM messages WHERE session_id = ? AND image_path IS NOT NULL LIMIT 1'
+      )
+      .get(sessionId) !== undefined
+  )
+}
+
 export function listSessions(limit = 50): SessionSummary[] {
   if (!db) return []
   const rows = db
@@ -338,6 +350,13 @@ export function kbStats(): { documents: number; chunks: number; mode: string } {
     (db.prepare('SELECT COUNT(*) AS n FROM kb_chunks').get() as { n: number }).n
   )
   return { documents, chunks, mode: vectorMode }
+}
+
+/** Retrieval only needs to know whether the index is empty; a COUNT scan is
+ *  not worth repeating on every chat turn. */
+export function hasKbChunks(): boolean {
+  if (!db) return false
+  return db.prepare('SELECT 1 AS ok FROM kb_chunks LIMIT 1').get() !== undefined
 }
 
 export function searchKb(vector: Float32Array, limit = 5): KbSearchHit[] {

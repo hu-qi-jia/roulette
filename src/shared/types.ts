@@ -203,6 +203,7 @@ export interface RouletteApi {
   selectSector(sector: Sector): void
   cancelWheel(): void
   closePanel(): void
+  minimizePanel(): void
   copyText(text: string): void
   insertText(text: string): void
   onInsertFailed(cb: () => void): () => void
@@ -233,7 +234,6 @@ export interface RouletteApi {
   addKbText(input: { title: string; text: string }): Promise<KbDocumentSummary | null>
   addKbFiles(): Promise<KbDocumentSummary[]>
   deleteKbDocument(id: number): Promise<KbDocumentSummary[]>
-  setKbEnabled(enabled: boolean): Promise<AppSettings>
   onKbProgress(cb: (status: KbStatus) => void): () => void
   onKbIngestProgress(cb: (progress: KbIngestProgress) => void): () => void
   onTestStopRecording(cb: () => void): () => void

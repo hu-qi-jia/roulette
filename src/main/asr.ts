@@ -72,13 +72,22 @@ async function runDownload(onProgress: (status: AsrStatus) => void): Promise<voi
     ? [override.replace(/\/+$/, '')]
     : BASE_URLS
   let completed = 0
+  // A 228 MB download reports progress per network chunk; forwarding every
+  // chunk costs a stat call and an IPC message. 10 updates/s is plenty.
+  let lastProgressAt = 0
+  const emitProgress = (force = false): void => {
+    const now = Date.now()
+    if (!force && now - lastProgressAt < 100) return
+    lastProgressAt = now
+    onProgress(getAsrStatus())
+  }
 
   try {
     for (const file of pending) {
       const dest = path.join(dir, file.name)
       await downloadFile(bases, file.name, dest, (received) => {
         downloadState.received = completed + received
-        onProgress(getAsrStatus())
+        emitProgress()
       })
       completed += file.expectedBytes
     }
@@ -89,7 +98,7 @@ async function runDownload(onProgress: (status: AsrStatus) => void): Promise<voi
     throw error
   } finally {
     downloadState.downloading = false
-    onProgress(getAsrStatus())
+    emitProgress(true)
   }
 }
 

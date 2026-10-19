@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { Rect, ShotCompletePayload, ShotShowPayload } from '../../shared/types'
+import type { Rect, ShotCompletePayload, ShotShowPayload } from '../../../shared/types'
 
 interface Point {
   x: number
@@ -134,6 +134,7 @@ export default function Shot(): React.JSX.Element {
             key={display.id}
             src={urls[display.id]}
             draggable={false}
+            alt=""
             style={{
               left: display.bounds.x - originX,
               top: display.bounds.y - originY,
@@ -156,12 +157,18 @@ export default function Shot(): React.JSX.Element {
               width: selection.width,
               height: selection.height
             }}
-          />
+          >
+            <span className="shot-corner tl" />
+            <span className="shot-corner tr" />
+            <span className="shot-corner bl" />
+            <span className="shot-corner br" />
+          </div>
           <div
             className="shot-size"
             style={{
-              left: selection.x,
-              top: selection.y + selection.height + 8
+              left: selection.x + selection.width,
+              top: selection.y + selection.height + 8,
+              transform: 'translateX(-100%)'
             }}
           >
             {Math.round(selection.width)} × {Math.round(selection.height)}
@@ -169,7 +176,7 @@ export default function Shot(): React.JSX.Element {
         </>
       )}
 
-      {!selection && <div className="shot-hint">{t('shotHint')}</div>}
+      <div className="shot-hint">{t('shotHint')}</div>
     </div>
   )
 }
@@ -231,12 +238,18 @@ async function crop(
 
     const displayOriginX = display.bounds.x - originX
     const displayOriginY = display.bounds.y - originY
-    const sourceX = ((piece.left - displayOriginX) / display.bounds.width) * display.imageSize.width
-    const sourceY = ((piece.top - displayOriginY) / display.bounds.height) * display.imageSize.height
+    const sourceX =
+      ((piece.left - displayOriginX) / display.bounds.width) *
+      display.imageSize.width
+    const sourceY =
+      ((piece.top - displayOriginY) / display.bounds.height) *
+      display.imageSize.height
     const sourceWidth =
-      ((piece.right - piece.left) / display.bounds.width) * display.imageSize.width
+      ((piece.right - piece.left) / display.bounds.width) *
+      display.imageSize.width
     const sourceHeight =
-      ((piece.bottom - piece.top) / display.bounds.height) * display.imageSize.height
+      ((piece.bottom - piece.top) / display.bounds.height) *
+      display.imageSize.height
 
     context.drawImage(
       image,
