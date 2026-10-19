@@ -7,6 +7,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent
 } from 'react'
 import { useTranslation } from 'react-i18next'
+import { cloneShortcuts, DEFAULT_SHORTCUTS } from '../../../shared/shortcuts'
 import type {
   AppSettings,
   AsrStatus,
@@ -161,6 +162,10 @@ export default function Panel(): React.JSX.Element {
     (updated: AppSettings): void => {
       setSettings(updated)
       autoSendRef.current = updated.asrAutoSend
+      void window.roulette
+        .getShortcuts()
+        .then((info) => setShortcuts(info))
+        .catch(() => setShortcuts(null))
       const ready = isConfigured(updated)
       setMessages((current) =>
         current.map((message) =>
@@ -538,7 +543,8 @@ export default function Panel(): React.JSX.Element {
       visionModel: '',
       hasApiKey: false,
       asrAutoSend: false,
-      kbEnabled: true
+      kbEnabled: true,
+      shortcuts: cloneShortcuts(DEFAULT_SHORTCUTS)
     }
     settingsDraft.populate(config)
     setView('settings')

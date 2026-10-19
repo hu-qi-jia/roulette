@@ -60,6 +60,7 @@ const api: RouletteApi = {
   },
   getSettings: () => ipcRenderer.invoke('settings:get') as Promise<AppSettings>,
   getShortcuts: () => ipcRenderer.invoke('shortcuts:get') as Promise<ShortcutInfo>,
+  setShortcutCapture: (active: boolean) => ipcRenderer.send('shortcuts:capture', active),
   getApiKey: () => ipcRenderer.invoke('settings:key') as Promise<string>,
   saveSettings: (input: SettingsInput) =>
     ipcRenderer.invoke('settings:save', input) as Promise<AppSettings>,

@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -13,14 +13,16 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     mouse_event, GetAsyncKeyState, SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, VK_LCONTROL, VK_MENU, VK_V,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, VK_CONTROL, VK_LCONTROL, VK_LWIN, VK_MENU,
+    VK_RWIN, VK_SHIFT, VK_V,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetAncestor, GetClassNameW, GetForegroundWindow,
     GetGUIThreadInfo, GetMessageW, GetWindowThreadProcessId, SendMessageTimeoutW, SetCursorPos,
     SetForegroundWindow, SetWindowsHookExW, ShowWindow, TranslateMessage, WindowFromPoint, GA_ROOT,
-    GUITHREADINFO, MSG, SMTO_ABORTIFHUNG, SW_RESTORE, WH_MOUSE_LL, WM_MOUSEMOVE, WM_PASTE,
-    WM_RBUTTONDOWN, WM_RBUTTONUP,
+    GUITHREADINFO, MSG, SMTO_ABORTIFHUNG, SW_RESTORE, WH_MOUSE_LL, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_PASTE, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
 
 /// Mirrors Win32 MSLLHOOKSTRUCT (x64).
@@ -36,6 +38,74 @@ struct Msllhookstruct {
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static LAST_MOVE_MS: AtomicU64 = AtomicU64::new(0);
 static SENDER: OnceLock<mpsc::SyncSender<String>> = OnceLock::new();
+
+const MOD_CTRL: u32 = 1;
+const MOD_ALT: u32 = 2;
+const MOD_SHIFT: u32 = 4;
+const MOD_WIN: u32 = 8;
+
+const BTN_LEFT: u32 = 1;
+const BTN_RIGHT: u32 = 2;
+const BTN_MIDDLE: u32 = 3;
+const BTN_X1: u32 = 4;
+const BTN_X2: u32 = 5;
+
+// Encoded as (modifier mask << 8) | button code.
+static HOLD_CONFIG: AtomicU32 = AtomicU32::new((MOD_ALT << 8) | BTN_RIGHT);
+static CLICK_CONFIG: AtomicU32 = AtomicU32::new(0);
+static HISTORY_CONFIG: AtomicU32 = AtomicU32::new(0);
+static SUPPRESS_UP: AtomicU32 = AtomicU32::new(0);
+
+fn encode_trigger(mods: u32, button: u32) -> u32 {
+    (mods << 8) | (button & 0xff)
+}
+
+fn trigger_mods(value: u32) -> u32 {
+    value >> 8
+}
+
+fn trigger_button(value: u32) -> u32 {
+    value & 0xff
+}
+
+unsafe fn current_modifiers() -> u32 {
+    let down = |vk: u16| (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0;
+    let mut mask = 0;
+    if down(VK_CONTROL) {
+        mask |= MOD_CTRL;
+    }
+    if down(VK_MENU) {
+        mask |= MOD_ALT;
+    }
+    if down(VK_SHIFT) {
+        mask |= MOD_SHIFT;
+    }
+    if down(VK_LWIN) || down(VK_RWIN) {
+        mask |= MOD_WIN;
+    }
+    mask
+}
+
+fn mouse_button(wparam: u32, mouse_data: u32) -> Option<u32> {
+    match wparam {
+        WM_LBUTTONDOWN | WM_LBUTTONUP => Some(BTN_LEFT),
+        WM_RBUTTONDOWN | WM_RBUTTONUP => Some(BTN_RIGHT),
+        WM_MBUTTONDOWN | WM_MBUTTONUP => Some(BTN_MIDDLE),
+        WM_XBUTTONDOWN | WM_XBUTTONUP => match (mouse_data >> 16) & 0xffff {
+            1 => Some(BTN_X1),
+            2 => Some(BTN_X2),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn is_button_down(wparam: u32) -> bool {
+    matches!(
+        wparam,
+        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN
+    )
+}
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -437,6 +507,36 @@ fn start_stdin_reader() {
                     eprintln!("[hook] wmpaste command ok={}", ok);
                     emit_paste_result(ok, "wm_paste", "");
                 }
+                Some("config") => {
+                    let mut values = [0u32; 6];
+                    let mut valid = true;
+                    for value in values.iter_mut() {
+                        match parts.next().and_then(|part| part.parse::<u32>().ok()) {
+                            Some(parsed) => *value = parsed,
+                            None => {
+                                valid = false;
+                                break;
+                            }
+                        }
+                    }
+                    if valid {
+                        HOLD_CONFIG.store(encode_trigger(values[0], values[1]), Ordering::Relaxed);
+                        CLICK_CONFIG
+                            .store(encode_trigger(values[2], values[3]), Ordering::Relaxed);
+                        HISTORY_CONFIG
+                            .store(encode_trigger(values[4], values[5]), Ordering::Relaxed);
+                        ACTIVE.store(false, Ordering::Relaxed);
+                        SUPPRESS_UP.store(0, Ordering::Relaxed);
+                        eprintln!(
+                            "[hook] config hold={} click={} history={}",
+                            encode_trigger(values[0], values[1]),
+                            encode_trigger(values[2], values[3]),
+                            encode_trigger(values[4], values[5])
+                        );
+                    } else {
+                        eprintln!("[hook] invalid config command");
+                    }
+                }
                 Some("capture") => {
                     let count = parts
                         .next()
@@ -508,48 +608,89 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
         return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
     }
 
-    match wparam as u32 {
-        WM_RBUTTONDOWN => {
-            let alt_down = (GetAsyncKeyState(VK_MENU as i32) as u16 & 0x8000) != 0;
-            if alt_down {
-                let info = &*(lparam as *const Msllhookstruct);
-                ACTIVE.store(true, Ordering::Relaxed);
-                LAST_MOVE_MS.store(now_ms(), Ordering::Relaxed);
-                let hwnd = GetForegroundWindow() as isize;
+    let message = wparam as u32;
+    let info = &*(lparam as *const Msllhookstruct);
+
+    if message == WM_MOUSEMOVE {
+        if ACTIVE.load(Ordering::Relaxed) {
+            let now = now_ms();
+            let last = LAST_MOVE_MS.load(Ordering::Relaxed);
+            if now.saturating_sub(last) >= 16 {
+                LAST_MOVE_MS.store(now, Ordering::Relaxed);
                 emit(format!(
-                    r#"{{"type":"down","x":{},"y":{},"hwnd":{}}}"#,
-                    info.pt.x, info.pt.y, hwnd
-                ));
-                return 1; // swallow: no context menu, no drag in the target app
-            }
-        }
-        WM_MOUSEMOVE => {
-            if ACTIVE.load(Ordering::Relaxed) {
-                let now = now_ms();
-                let last = LAST_MOVE_MS.load(Ordering::Relaxed);
-                if now.saturating_sub(last) >= 16 {
-                    LAST_MOVE_MS.store(now, Ordering::Relaxed);
-                    let info = &*(lparam as *const Msllhookstruct);
-                    emit(format!(
-                        r#"{{"type":"move","x":{},"y":{}}}"#,
-                        info.pt.x, info.pt.y
-                    ));
-                }
-                // Do NOT swallow moves: the cursor must actually move.
-            }
-        }
-        WM_RBUTTONUP => {
-            if ACTIVE.load(Ordering::Relaxed) {
-                ACTIVE.store(false, Ordering::Relaxed);
-                let info = &*(lparam as *const Msllhookstruct);
-                emit(format!(
-                    r#"{{"type":"up","x":{},"y":{}}}"#,
+                    r#"{{"type":"move","x":{},"y":{}}}"#,
                     info.pt.x, info.pt.y
                 ));
-                return 1;
             }
+            // Do NOT swallow moves: the cursor must actually move.
         }
-        _ => {}
+        return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+    }
+
+    let Some(button) = mouse_button(message, info.mouse_data) else {
+        return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+    };
+
+    if is_button_down(message) {
+        if ACTIVE.load(Ordering::Relaxed) {
+            return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+        }
+
+        let modifiers = current_modifiers();
+
+        let hold = HOLD_CONFIG.load(Ordering::Relaxed);
+        if trigger_button(hold) != 0
+            && button == trigger_button(hold)
+            && modifiers == trigger_mods(hold)
+        {
+            ACTIVE.store(true, Ordering::Relaxed);
+            LAST_MOVE_MS.store(now_ms(), Ordering::Relaxed);
+            let hwnd = GetForegroundWindow() as isize;
+            emit(format!(
+                r#"{{"type":"down","x":{},"y":{},"hwnd":{}}}"#,
+                info.pt.x, info.pt.y, hwnd
+            ));
+            return 1; // swallow: no context menu, no drag in the target app
+        }
+
+        let click = CLICK_CONFIG.load(Ordering::Relaxed);
+        if trigger_button(click) != 0
+            && button == trigger_button(click)
+            && modifiers == trigger_mods(click)
+        {
+            SUPPRESS_UP.store(button, Ordering::Relaxed);
+            emit(r#"{"type":"trigger","action":"click"}"#.to_string());
+            return 1;
+        }
+
+        let history = HISTORY_CONFIG.load(Ordering::Relaxed);
+        if trigger_button(history) != 0
+            && button == trigger_button(history)
+            && modifiers == trigger_mods(history)
+        {
+            SUPPRESS_UP.store(button, Ordering::Relaxed);
+            emit(r#"{"type":"trigger","action":"history"}"#.to_string());
+            return 1;
+        }
+
+        return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+    }
+
+    // Button up.
+    if ACTIVE.load(Ordering::Relaxed) {
+        let hold = HOLD_CONFIG.load(Ordering::Relaxed);
+        if button == trigger_button(hold) {
+            ACTIVE.store(false, Ordering::Relaxed);
+            emit(format!(
+                r#"{{"type":"up","x":{},"y":{}}}"#,
+                info.pt.x, info.pt.y
+            ));
+            return 1;
+        }
+    }
+    if SUPPRESS_UP.load(Ordering::Relaxed) == button {
+        SUPPRESS_UP.store(0, Ordering::Relaxed);
+        return 1;
     }
 
     CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)

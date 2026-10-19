@@ -118,6 +118,7 @@ export interface AppSettings {
   hasApiKey: boolean
   asrAutoSend: boolean
   kbEnabled: boolean
+  shortcuts: ShortcutSettings
 }
 
 export interface SettingsInput {
@@ -127,6 +128,7 @@ export interface SettingsInput {
   apiKey?: string
   asrAutoSend?: boolean
   kbEnabled?: boolean
+  shortcuts?: ShortcutSettings
 }
 
 export interface AsrStatus {
@@ -145,12 +147,18 @@ export interface AsrResult {
 }
 
 export interface ShortcutInfo {
-  /** Hold gesture; null when the native mouse hook is unavailable. */
-  hold: string | null
-  /** Registered accelerator for click mode, if one was available. */
-  click: string | null
-  /** Registered accelerator for the history panel, if available. */
-  history: string | null
+  bindings: ShortcutSettings
+  /** Active accelerator / native binding for each action, null if unavailable. */
+  active: Record<ShortcutAction, string | null>
+  errors: Partial<Record<ShortcutAction, string>>
+}
+
+export type ShortcutAction = 'hold' | 'click' | 'history'
+
+export interface ShortcutSettings {
+  hold: string[]
+  click: string[]
+  history: string[]
 }
 
 export interface TranscribeRequest {
@@ -220,6 +228,7 @@ export interface RouletteApi {
   onInsertFailed(cb: () => void): () => void
   getSettings(): Promise<AppSettings>
   getShortcuts(): Promise<ShortcutInfo>
+  setShortcutCapture(active: boolean): void
   getApiKey(): Promise<string>
   saveSettings(input: SettingsInput): Promise<AppSettings>
   listSessions(): Promise<SessionSummary[]>
@@ -260,5 +269,6 @@ export type HookEvent =
   | { type: 'up'; x: number; y: number }
   | { type: 'foreground'; hwnd: number; class?: string }
   | { type: 'foreground-query'; hwnd: number; class?: string }
+  | { type: 'trigger'; action: 'click' | 'history' }
   | { type: 'paste-result'; ok: boolean; method: string; class: string }
   | { type: 'capture-result'; ok: boolean; error?: string }

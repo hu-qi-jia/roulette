@@ -1,8 +1,15 @@
 import { useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { AsrStatus, KbStatus, ShortcutInfo } from '../../../../shared/types'
+import { validateShortcuts, sameBinding } from '../../../../shared/shortcuts'
+import type {
+  AsrStatus,
+  KbStatus,
+  ShortcutAction,
+  ShortcutInfo
+} from '../../../../shared/types'
 import { EyeIcon, EyeOffIcon } from '../../icons'
 import type { SettingsDraft } from '../hooks/useSettingsDraft'
+import { ShortcutInput } from './ShortcutInput'
 import { Toggle } from './Toggle'
 
 interface SettingsViewProps {
@@ -17,11 +24,6 @@ interface SettingsViewProps {
   onPrepareKb: () => void
   shortcuts: ShortcutInfo | null
   focus: 'vector' | null
-}
-
-function formatAccelerator(value: string | null, fallback: string): string {
-  if (!value) return fallback
-  return value.replace(/\bControl\b/g, 'Ctrl').replace(/\+/g, ' + ')
 }
 
 export function SettingsView({
@@ -77,6 +79,45 @@ export function SettingsView({
       : kbStatus?.installed
         ? ''
         : 'missing'
+
+  const shortcutValidation = validateShortcuts(draft.shortcuts)
+
+  const shortcutErrorText = (action: ShortcutAction): string | null => {
+    switch (shortcutValidation[action]) {
+      case 'require-mouse':
+        return t('shortcutNeedsMouse')
+      case 'left-needs-modifier':
+        return t('shortcutLeftNeedsModifier')
+      case 'conflict':
+        return t('shortcutConflict')
+      case 'invalid':
+        return t('shortcutInvalid')
+      default:
+        break
+    }
+    const remote =
+      shortcuts && sameBinding(shortcuts.bindings[action], draft.shortcuts[action])
+        ? shortcuts.errors?.[action]
+        : undefined
+    switch (remote) {
+      case 'register-failed':
+        return t('shortcutUnavailable')
+      case 'hook-unavailable':
+        return t('shortcutHookUnavailable')
+      case 'require-mouse':
+        return t('shortcutNeedsMouse')
+      case 'left-needs-modifier':
+        return t('shortcutLeftNeedsModifier')
+      case 'conflict':
+        return t('shortcutConflict')
+      default:
+        return null
+    }
+  }
+
+  const updateShortcut = (action: ShortcutAction, binding: string[]): void => {
+    setDraft({ shortcuts: { ...draft.shortcuts, [action]: binding } })
+  }
 
   return (
     <div className="page settings-page">
@@ -229,25 +270,30 @@ export function SettingsView({
         <section className="settings-block">
           <h3 className="settings-block-title">{t('shortcuts')}</h3>
 
-          <div className="settings-row">
-            <span>{t('holdShortcut')}</span>
-            <span className="grow" />
-            <kbd>
-              {shortcuts?.hold ? t('holdShortcutValue') : t('notAvailable')}
-            </kbd>
-          </div>
+          <ShortcutInput
+            label={t('holdShortcut')}
+            value={draft.shortcuts.hold}
+            onChange={(binding) => updateShortcut('hold', binding)}
+            requireMouse
+            hint={t('holdShortcutHint')}
+            error={shortcutErrorText('hold')}
+          />
 
-          <div className="settings-row">
-            <span>{t('clickShortcut')}</span>
-            <span className="grow" />
-            <kbd>{formatAccelerator(shortcuts?.click ?? null, t('notAvailable'))}</kbd>
-          </div>
+          <ShortcutInput
+            label={t('clickShortcut')}
+            value={draft.shortcuts.click}
+            onChange={(binding) => updateShortcut('click', binding)}
+            hint={t('shortcutAnyInputHint')}
+            error={shortcutErrorText('click')}
+          />
 
-          <div className="settings-row">
-            <span>{t('historyShortcut')}</span>
-            <span className="grow" />
-            <kbd>{formatAccelerator(shortcuts?.history ?? null, t('notAvailable'))}</kbd>
-          </div>
+          <ShortcutInput
+            label={t('historyShortcut')}
+            value={draft.shortcuts.history}
+            onChange={(binding) => updateShortcut('history', binding)}
+            hint={t('shortcutAnyInputHint')}
+            error={shortcutErrorText('history')}
+          />
         </section>
 
         <button type="submit" className="save" disabled={!canSave}>

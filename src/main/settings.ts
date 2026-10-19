@@ -1,7 +1,12 @@
 import { app, safeStorage } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
-import type { AppSettings, SettingsInput } from '../shared/types'
+import {
+  cloneShortcuts,
+  DEFAULT_SHORTCUTS,
+  normalizeShortcuts
+} from '../shared/shortcuts'
+import type { AppSettings, SettingsInput, ShortcutSettings } from '../shared/types'
 
 interface StoredSettings {
   baseUrl: string
@@ -9,6 +14,7 @@ interface StoredSettings {
   visionModel: string
   asrAutoSend: boolean
   kbEnabled: boolean
+  shortcuts: ShortcutSettings
   apiKeyEnc?: string
 }
 
@@ -17,7 +23,8 @@ const EMPTY: StoredSettings = {
   textModel: '',
   visionModel: '',
   asrAutoSend: false,
-  kbEnabled: true
+  kbEnabled: true,
+  shortcuts: cloneShortcuts(DEFAULT_SHORTCUTS)
 }
 
 function settingsPath(): string {
@@ -33,10 +40,11 @@ function loadStored(): StoredSettings {
       visionModel: typeof parsed.visionModel === 'string' ? parsed.visionModel : '',
       asrAutoSend: parsed.asrAutoSend === true,
       kbEnabled: parsed.kbEnabled !== false,
+      shortcuts: normalizeShortcuts(parsed.shortcuts) ?? cloneShortcuts(DEFAULT_SHORTCUTS),
       apiKeyEnc: typeof parsed.apiKeyEnc === 'string' ? parsed.apiKeyEnc : undefined
     }
   } catch {
-    return { ...EMPTY }
+    return { ...EMPTY, shortcuts: cloneShortcuts(EMPTY.shortcuts) }
   }
 }
 
@@ -62,7 +70,8 @@ export function getPublicSettings(): AppSettings {
     visionModel: envValue('ROULETTE_VISION_MODEL') ?? stored.visionModel,
     hasApiKey: Boolean(envKey || stored.apiKeyEnc),
     asrAutoSend: stored.asrAutoSend,
-    kbEnabled: stored.kbEnabled
+    kbEnabled: stored.kbEnabled,
+    shortcuts: cloneShortcuts(stored.shortcuts)
   }
 }
 
@@ -91,6 +100,10 @@ export function saveSettings(input: SettingsInput): AppSettings {
   }
   if (typeof input.kbEnabled === 'boolean') {
     stored.kbEnabled = input.kbEnabled
+  }
+  if (input.shortcuts) {
+    const normalized = normalizeShortcuts(input.shortcuts)
+    if (normalized) stored.shortcuts = normalized
   }
 
   if (typeof input.apiKey === 'string') {

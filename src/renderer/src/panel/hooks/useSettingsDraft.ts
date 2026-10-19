@@ -1,6 +1,11 @@
 import { useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { AppSettings, SettingsInput } from '../../../../shared/types'
+import {
+  cloneShortcuts,
+  DEFAULT_SHORTCUTS,
+  validateShortcuts
+} from '../../../../shared/shortcuts'
+import type { AppSettings, SettingsInput, ShortcutSettings } from '../../../../shared/types'
 
 export interface SettingsDraft {
   baseUrl: string
@@ -10,6 +15,7 @@ export interface SettingsDraft {
   visionModel: string
   asrAutoSend: boolean
   kbEnabled: boolean
+  shortcuts: ShortcutSettings
   showApiKey: boolean
 }
 
@@ -37,6 +43,7 @@ export function useSettingsDraft({
     visionModel: '',
     asrAutoSend: false,
     kbEnabled: true,
+    shortcuts: cloneShortcuts(DEFAULT_SHORTCUTS),
     showApiKey: false
   })
 
@@ -53,6 +60,7 @@ export function useSettingsDraft({
       visionModel: settings.visionModel || settings.textModel,
       asrAutoSend: settings.asrAutoSend,
       kbEnabled: settings.kbEnabled,
+      shortcuts: cloneShortcuts(settings.shortcuts),
       showApiKey: false
     })
     void window.roulette
@@ -64,9 +72,12 @@ export function useSettingsDraft({
   const canSave = useMemo(
     () =>
       Boolean(
-        draft.baseUrl.trim() && draft.textModel.trim() && draft.visionModel.trim()
+        draft.baseUrl.trim() &&
+          draft.textModel.trim() &&
+          draft.visionModel.trim() &&
+          Object.keys(validateShortcuts(draft.shortcuts)).length === 0
       ),
-    [draft.baseUrl, draft.textModel, draft.visionModel]
+    [draft.baseUrl, draft.textModel, draft.visionModel, draft.shortcuts]
   )
 
   const save = useCallback(async (): Promise<void> => {
@@ -75,7 +86,8 @@ export function useSettingsDraft({
       textModel: draft.textModel.trim(),
       visionModel: draft.visionModel.trim(),
       asrAutoSend: draft.asrAutoSend,
-      kbEnabled: draft.kbEnabled
+      kbEnabled: draft.kbEnabled,
+      shortcuts: cloneShortcuts(draft.shortcuts)
     }
     // Only touch the stored key when the field was edited, so a quick save
     // cannot erase a key that is still being loaded.

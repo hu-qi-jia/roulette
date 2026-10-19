@@ -29,6 +29,15 @@ import {
 import { streamChat } from './engine'
 import { getApiKey, getPublicSettings, saveSettings } from './settings'
 import {
+  cloneShortcuts,
+  DEFAULT_SHORTCUTS,
+  describeBinding,
+  mouseButtonCode,
+  toAccelerator,
+  toHookConfig,
+  validateShortcuts
+} from '../shared/shortcuts'
+import {
   appendMessage,
   closeStore,
   deleteKbDocument,
@@ -60,6 +69,9 @@ import type {
   ShotCompletePayload,
   ShotDisplay,
   ShotShowPayload,
+  ShortcutAction,
+  ShortcutInfo,
+  ShortcutSettings,
   StoredMessage,
   TranscribeRequest,
   WheelMode,
@@ -67,8 +79,6 @@ import type {
 } from '../shared/types'
 
 const DEAD_ZONE = 76
-const CLICK_SHORTCUTS = ['Control+Shift+Space', 'Alt+Shift+Space', 'Control+Alt+R']
-const HISTORY_SHORTCUTS = ['Control+Alt+H', 'Alt+Shift+H']
 const SHOT_ESCAPE = 'Escape'
 // The native paste helper waits for the target window to own the foreground;
 // a short delay is enough for the panel to disappear. Overridable for tests.
@@ -124,7 +134,14 @@ let panelShowTimer: NodeJS.Timeout | null = null
 let shotStartedAt = 0
 let clickShortcut: string | null = null
 let historyShortcut: string | null = null
-const HOLD_SHORTCUT = 'Alt+RightClick'
+let activeShortcuts: ShortcutSettings = cloneShortcuts(DEFAULT_SHORTCUTS)
+let shortcutActive: Record<ShortcutAction, string | null> = {
+  hold: null,
+  click: null,
+  history: null
+}
+let shortcutErrors: Partial<Record<ShortcutAction, string>> = {}
+let shortcutCapture = false
 const activeChats = new Map<string, AbortController>()
 
 function toDip(x: number, y: number): { x: number; y: number } {
@@ -720,6 +737,100 @@ function finishSelection(result: Sector | 'cancel'): void {
     else if (result !== 'cancel') openPanel(result)
     hideWheel()
   }, 200)
+}
+
+function toggleClickWheel(): void {
+  if (active) {
+    finishSelection('cancel')
+  } else {
+    showWheel('click', screen.getCursorScreenPoint())
+  }
+}
+
+function openHistoryPanel(): void {
+  console.log('[shortcut] history panel')
+  if (panel?.isVisible() && !panel.isMinimized()) {
+    sendToPanel('panel:history')
+    panel.focus()
+    return
+  }
+  openPanel('text', { openHistory: true })
+}
+
+function getShortcutInfo(): ShortcutInfo {
+  return {
+    bindings: cloneShortcuts(activeShortcuts),
+    active: { ...shortcutActive },
+    errors: { ...shortcutErrors }
+  }
+}
+
+function sendHookShortcutConfig(): void {
+  if (!hook.isRunning()) return
+  hook.send(shortcutCapture ? 'config 0 0 0 0 0 0' : toHookConfig(activeShortcuts))
+}
+
+function applyShortcuts(next: ShortcutSettings): void {
+  activeShortcuts = cloneShortcuts(next)
+  shortcutActive = { hold: null, click: null, history: null }
+  shortcutErrors = {}
+
+  if (clickShortcut) {
+    globalShortcut.unregister(clickShortcut)
+    clickShortcut = null
+  }
+  if (historyShortcut) {
+    globalShortcut.unregister(historyShortcut)
+    historyShortcut = null
+  }
+
+  if (shortcutCapture) {
+    sendHookShortcutConfig()
+    return
+  }
+
+  shortcutErrors = { ...validateShortcuts(activeShortcuts) }
+
+  if (!shortcutErrors.hold) {
+    if (hook.isRunning()) {
+      shortcutActive.hold = describeBinding(activeShortcuts.hold)
+    } else {
+      shortcutErrors.hold = 'hook-unavailable'
+    }
+  }
+
+  for (const action of ['click', 'history'] as const) {
+    if (shortcutErrors[action]) continue
+    const binding = activeShortcuts[action]
+    const accelerator = toAccelerator(binding)
+    if (accelerator) {
+      try {
+        const registered = globalShortcut.register(
+          accelerator,
+          action === 'click' ? toggleClickWheel : openHistoryPanel
+        )
+        if (registered) {
+          if (action === 'click') clickShortcut = accelerator
+          else historyShortcut = accelerator
+          shortcutActive[action] = accelerator
+        } else {
+          shortcutErrors[action] = 'register-failed'
+        }
+      } catch {
+        shortcutErrors[action] = 'register-failed'
+      }
+    } else if (mouseButtonCode(binding) > 0) {
+      shortcutActive[action] = describeBinding(binding)
+    } else {
+      shortcutErrors[action] = 'invalid'
+    }
+  }
+
+  sendHookShortcutConfig()
+  console.log(
+    '[shortcut] applied',
+    JSON.stringify({ active: shortcutActive, errors: shortcutErrors })
+  )
 }
 
 function sendShotShow(payload: ShotShowPayload): void {
@@ -1318,6 +1429,12 @@ function onHookEvent(ev: HookEvent): void {
       targetHwnd = ev.hwnd
       break
 
+    case 'trigger':
+      if (shortcutCapture) break
+      if (ev.action === 'click') toggleClickWheel()
+      else if (ev.action === 'history') openHistoryPanel()
+      break
+
     case 'move': {
       if (!active || mode !== 'hold') break
       const p = toDip(ev.x, ev.y)
@@ -1431,6 +1548,8 @@ function bootstrap(): void {
   hook.on('event', onHookEvent)
   hook.on('exit', () => {
     console.warn('[hook] sidecar stopped; keyboard click mode still works')
+    shortcutActive.hold = null
+    shortcutErrors.hold = 'hook-unavailable'
   })
 
   if (!hook.start(hookPath())) {
@@ -1438,43 +1557,7 @@ function bootstrap(): void {
   }
   perf('hook started')
 
-  const toggleClickWheel = (): void => {
-    if (active) {
-      finishSelection('cancel')
-    } else {
-      showWheel('click', screen.getCursorScreenPoint())
-    }
-  }
-
-  clickShortcut = null
-  for (const shortcut of CLICK_SHORTCUTS) {
-    if (globalShortcut.register(shortcut, toggleClickWheel)) {
-      clickShortcut = shortcut
-      break
-    }
-  }
-  if (clickShortcut) console.log('[shortcut] click mode:', clickShortcut)
-  else console.warn('[shortcut] no click-mode shortcut available')
-
-  const openHistoryPanel = (): void => {
-    console.log('[shortcut] history panel')
-    if (panel?.isVisible() && !panel.isMinimized()) {
-      sendToPanel('panel:history')
-      panel.focus()
-      return
-    }
-    openPanel('text', { openHistory: true })
-  }
-
-  historyShortcut = null
-  for (const shortcut of HISTORY_SHORTCUTS) {
-    if (globalShortcut.register(shortcut, openHistoryPanel)) {
-      historyShortcut = shortcut
-      break
-    }
-  }
-  if (historyShortcut) console.log('[shortcut] history:', historyShortcut)
-  else console.warn('[shortcut] no history shortcut available')
+  applyShortcuts(getPublicSettings().shortcuts)
 
   ipcMain.on('wheel:select', (_event, sector: Sector) => finishSelection(sector))
   ipcMain.on('wheel:cancel', () => finishSelection('cancel'))
@@ -1492,13 +1575,17 @@ function bootstrap(): void {
   })
 
   ipcMain.handle('settings:get', () => getPublicSettings())
-  ipcMain.handle('shortcuts:get', () => ({
-    hold: hook.isRunning() ? HOLD_SHORTCUT : null,
-    click: clickShortcut,
-    history: historyShortcut
-  }))
+  ipcMain.handle('shortcuts:get', () => getShortcutInfo())
+  ipcMain.on('shortcuts:capture', (_event, capturing: boolean) => {
+    shortcutCapture = Boolean(capturing)
+    applyShortcuts(activeShortcuts)
+  })
   ipcMain.handle('settings:key', () => getApiKey() ?? '')
-  ipcMain.handle('settings:save', (_event, input: SettingsInput) => saveSettings(input))
+  ipcMain.handle('settings:save', (_event, input: SettingsInput) => {
+    const updated = saveSettings(input)
+    applyShortcuts(updated.shortcuts)
+    return updated
+  })
 
   ipcMain.handle('history:list', () => listSessions())
   ipcMain.handle('history:get', (_event, id: string) => {
