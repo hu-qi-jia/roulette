@@ -99,12 +99,6 @@ import type {
 
 const DEAD_ZONE = 76
 const SHOT_ESCAPE = 'Escape'
-// The native paste helper waits for the target window to own the foreground;
-// a short delay is enough for the panel to disappear. Overridable for tests.
-const INSERT_FOCUS_DELAY_MS = (() => {
-  const value = Number(process.env.ROULETTE_TEST_INSERT_DELAY_MS)
-  return Number.isFinite(value) && value >= 0 ? value : 100
-})()
 
 // Set ROULETTE_PERF=1 to log startup and pipeline timings to the console.
 const PERF = process.env.ROULETTE_PERF === '1'
@@ -173,6 +167,9 @@ let shortcutErrors: Partial<Record<ShortcutAction, string>> = {}
 let shortcutCapture = false
 let panelPinned = true
 let dialogOpen = false
+/** True while a synthetic paste owns the foreground; the panel must not
+ *  auto-minimize when the target window activates. */
+let pasteActive = false
 const activeChats = new Map<string, AbortController>()
 
 function toDip(x: number, y: number): { x: number; y: number } {
@@ -235,7 +232,7 @@ function applyPanelPin(pinned: boolean): void {
 function minimizePanelIfUnpinned(): void {
   setTimeout(() => {
     if (panelPinned || !panel || panel.isMinimized() || !panel.isVisible()) return
-    if (textDrag || shotActive || dialogOpen) return
+    if (textDrag || shotActive || dialogOpen || pasteActive) return
     if (panel.isFocused() || bubble?.isFocused()) return
     // Clicking the tray blurs the panel; do not race the tray's own toggle.
     if (Date.now() - trayInteractedAt < 800) return
@@ -770,6 +767,9 @@ async function insertText(text: string): Promise<void> {
   if (!text.trim()) return
   console.log('[insert] start target:', targetHwnd, 'hook:', hook.isRunning(), 'chars:', text.length)
 
+  // Keep the panel on screen and out of the auto-minimize path; only its
+  // foreground is released so the previous app can receive the paste.
+  pasteActive = true
   try {
     if (!hook.isRunning()) {
       console.warn('[insert] hook is not running; copying instead')
@@ -784,11 +784,9 @@ async function insertText(text: string): Promise<void> {
     await clipboard.writeText(text)
     console.log('[insert] clipboard written')
 
-    panel?.hide()
-    // Give the OS time to hand the foreground and keyboard focus back to the
-    // previous app before any keystrokes are injected. The native helper also
-    // waits for the target to become foreground, so this can be short.
-    await delay(INSERT_FOCUS_DELAY_MS)
+    panel?.blur()
+    // Let the OS hand the foreground back without hiding the panel.
+    await delay(60)
 
     // Prefer the window that is foreground right now over the window that was
     // under the cursor when the wheel opened: the user may have switched apps.
@@ -845,6 +843,8 @@ async function insertText(text: string): Promise<void> {
     await clipboard.writeText(text).catch(() => {})
     revealPanel()
     sendToPanel('insert:failed')
+  } finally {
+    pasteActive = false
   }
 }
 
@@ -944,6 +944,7 @@ function pointInWindow(
 async function dropTextAt(text: string, x: number, y: number): Promise<void> {
   const started = Date.now()
   console.log('[drag] drop at', Math.round(x), Math.round(y), 'chars:', text.length)
+  pasteActive = true
   const fail = async (): Promise<void> => {
     await clipboard.writeText(text).catch(() => {})
     revealPanel()
@@ -958,10 +959,6 @@ async function dropTextAt(text: string, x: number, y: number): Promise<void> {
 
     const snapshot = await snapshotClipboard()
     await clipboard.writeText(text)
-    panel?.hide()
-    // The drop point is outside the panel and the native helper activates the
-    // target itself, so it only needs the hide to be committed.
-    await delay(20)
 
     const resultPromise = hook.waitFor((event) => event.type === 'paste-result', 5000)
     const sent = hook.send(`dropat ${Math.round(x)} ${Math.round(y)}`)
@@ -987,6 +984,8 @@ async function dropTextAt(text: string, x: number, y: number): Promise<void> {
   } catch (error) {
     console.error('[drag] failed', error)
     await fail()
+  } finally {
+    pasteActive = false
   }
 }
 
