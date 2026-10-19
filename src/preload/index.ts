@@ -51,8 +51,19 @@ const api: RouletteApi = {
   cancelWheel: () => ipcRenderer.send('wheel:cancel'),
   closePanel: () => ipcRenderer.send('panel:close'),
   minimizePanel: () => ipcRenderer.send('panel:minimize'),
+  setPanelPinned: (pinned: boolean) =>
+    ipcRenderer.invoke('panel:pin', pinned) as Promise<boolean>,
+  toggleFromBubble: () => ipcRenderer.send('bubble:toggle'),
+  moveBubble: (x: number, y: number) => ipcRenderer.send('bubble:move', { x, y }),
+  placeBubble: () => ipcRenderer.send('bubble:place'),
   copyText: (text: string) => ipcRenderer.send('clipboard:write', text),
   insertText: (text: string) => ipcRenderer.send('panel:insert', text),
+  beginTextDrag: (text: string) => ipcRenderer.send('panel:drag-begin', text),
+  prepareTextDrag: () => ipcRenderer.send('panel:drag-prepare'),
+  cancelTextDrag: () => ipcRenderer.send('panel:drag-cancel'),
+  onTextDragState: (cb) => subscribe<boolean>('drag:state', cb),
+  onDragText: (cb) => subscribe<string>('drag:text', cb),
+  getDragText: () => ipcRenderer.invoke('drag:text') as Promise<string>,
   onInsertFailed: (cb) => {
     const listener = (): void => cb()
     ipcRenderer.on('insert:failed', listener)

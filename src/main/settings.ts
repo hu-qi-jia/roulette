@@ -15,6 +15,9 @@ interface StoredSettings {
   asrAutoSend: boolean
   kbEnabled: boolean
   webSearch: boolean
+  alwaysOnTop: boolean
+  bubbleX?: number
+  bubbleY?: number
   shortcuts: ShortcutSettings
   apiKeyEnc?: string
 }
@@ -26,6 +29,7 @@ const EMPTY: StoredSettings = {
   asrAutoSend: false,
   kbEnabled: true,
   webSearch: false,
+  alwaysOnTop: true,
   shortcuts: cloneShortcuts(DEFAULT_SHORTCUTS)
 }
 
@@ -43,6 +47,13 @@ function loadStored(): StoredSettings {
       asrAutoSend: parsed.asrAutoSend === true,
       kbEnabled: parsed.kbEnabled !== false,
       webSearch: parsed.webSearch === true,
+      alwaysOnTop: parsed.alwaysOnTop !== false,
+      bubbleX: typeof parsed.bubbleX === 'number' && Number.isFinite(parsed.bubbleX)
+        ? parsed.bubbleX
+        : undefined,
+      bubbleY: typeof parsed.bubbleY === 'number' && Number.isFinite(parsed.bubbleY)
+        ? parsed.bubbleY
+        : undefined,
       shortcuts: normalizeShortcuts(parsed.shortcuts) ?? cloneShortcuts(DEFAULT_SHORTCUTS),
       apiKeyEnc: typeof parsed.apiKeyEnc === 'string' ? parsed.apiKeyEnc : undefined
     }
@@ -75,6 +86,7 @@ export function getPublicSettings(): AppSettings {
     asrAutoSend: stored.asrAutoSend,
     kbEnabled: stored.kbEnabled,
     webSearch: stored.webSearch,
+    alwaysOnTop: stored.alwaysOnTop,
     shortcuts: cloneShortcuts(stored.shortcuts)
   }
 }
@@ -108,6 +120,9 @@ export function saveSettings(input: SettingsInput): AppSettings {
   if (typeof input.webSearch === 'boolean') {
     stored.webSearch = input.webSearch
   }
+  if (typeof input.alwaysOnTop === 'boolean') {
+    stored.alwaysOnTop = input.alwaysOnTop
+  }
   if (input.shortcuts) {
     const normalized = normalizeShortcuts(input.shortcuts)
     if (normalized) stored.shortcuts = normalized
@@ -127,4 +142,26 @@ export function saveSettings(input: SettingsInput): AppSettings {
 
   writeStored(stored)
   return getPublicSettings()
+}
+
+/** Persist the panel's pin state without touching unrelated settings. */
+export function setAlwaysOnTopSetting(value: boolean): AppSettings {
+  const stored = loadStored()
+  stored.alwaysOnTop = value
+  writeStored(stored)
+  return getPublicSettings()
+}
+
+export function getBubblePosition(): { x: number; y: number } | null {
+  const stored = loadStored()
+  return typeof stored.bubbleX === 'number' && typeof stored.bubbleY === 'number'
+    ? { x: stored.bubbleX, y: stored.bubbleY }
+    : null
+}
+
+export function setBubblePosition(x: number, y: number): void {
+  const stored = loadStored()
+  stored.bubbleX = Math.round(x)
+  stored.bubbleY = Math.round(y)
+  writeStored(stored)
 }

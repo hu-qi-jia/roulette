@@ -119,6 +119,24 @@ export function ArrowRightIcon({ size = 18 }: { size?: number }): JSX.Element {
   )
 }
 
+export function CopyIcon({ size = 17 }: { size?: number }): JSX.Element {
+  return (
+    <IconBase size={size}>
+      <rect x="9" y="9" width="11" height="11" rx="2.5" />
+      <path d="M15 9V6.5A2.5 2.5 0 0 0 12.5 4h-6A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 6.5 15H9" />
+    </IconBase>
+  )
+}
+
+export function RetryIcon({ size = 17 }: { size?: number }): JSX.Element {
+  return (
+    <IconBase size={size}>
+      <path d="M20 12a8 8 0 1 1-2.34-5.66" />
+      <path d="M20 4v5h-5" />
+    </IconBase>
+  )
+}
+
 export function StopIcon(): JSX.Element {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
@@ -141,6 +159,39 @@ export function PencilIcon({ size = 14 }: { size?: number }): JSX.Element {
     <IconBase size={size}>
       <path d="M4 20l4.2-1 10.3-10.3a2.1 2.1 0 0 0-3-3L5.2 16 4 20Z" />
       <path d="M13.5 6.5l3 3" />
+    </IconBase>
+  )
+}
+
+export function GripIcon({ size = 14 }: { size?: number }): JSX.Element {
+  return (
+    <IconBase size={size}>
+      <circle cx="9" cy="7" r="1" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="7" r="1" fill="currentColor" stroke="none" />
+      <circle cx="9" cy="12" r="1" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="12" r="1" fill="currentColor" stroke="none" />
+      <circle cx="9" cy="17" r="1" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="17" r="1" fill="currentColor" stroke="none" />
+    </IconBase>
+  )
+}
+
+const PIN_PATH =
+  'M12 17v5M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z'
+
+export function PinIcon({ size = 18 }: { size?: number }): JSX.Element {
+  return (
+    <IconBase size={size}>
+      <path d={PIN_PATH} />
+    </IconBase>
+  )
+}
+
+export function PinOffIcon({ size = 18 }: { size?: number }): JSX.Element {
+  return (
+    <IconBase size={size}>
+      <path d={PIN_PATH} />
+      <path d="M3 3l18 18" />
     </IconBase>
   )
 }

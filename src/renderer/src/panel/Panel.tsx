@@ -49,6 +49,22 @@ function isConfigured(settings: AppSettings | null): boolean {
   )
 }
 
+function sameSettings(a: AppSettings, b: AppSettings): boolean {
+  return (
+    a.baseUrl === b.baseUrl &&
+    a.textModel === b.textModel &&
+    a.visionModel === b.visionModel &&
+    a.hasApiKey === b.hasApiKey &&
+    a.asrAutoSend === b.asrAutoSend &&
+    a.kbEnabled === b.kbEnabled &&
+    a.webSearch === b.webSearch &&
+    a.alwaysOnTop === b.alwaysOnTop &&
+    a.shortcuts.hold.join('+') === b.shortcuts.hold.join('+') &&
+    a.shortcuts.click.join('+') === b.shortcuts.click.join('+') &&
+    a.shortcuts.history.join('+') === b.shortcuts.history.join('+')
+  )
+}
+
 export default function Panel(): React.JSX.Element {
   const { t } = useTranslation()
 
@@ -79,6 +95,11 @@ export default function Panel(): React.JSX.Element {
   const [shortcuts, setShortcuts] = useState<ShortcutInfo | null>(null)
   const [autoSendPending, setAutoSendPending] = useState(false)
   const [settingsFocus, setSettingsFocus] = useState<'vector' | null>(null)
+  const [pinned, setPinned] = useState(true)
+  const messagesRef = useRef<Message[]>([])
+  const busyRef = useRef(false)
+  messagesRef.current = messages
+  busyRef.current = busy
 
   const showToast = useCallback((text: string): void => {
     setToast(text)
@@ -214,7 +235,9 @@ export default function Panel(): React.JSX.Element {
     void window.roulette
       .getSettings()
       .then((config) => {
-        setSettings(config)
+        setSettings((current) =>
+          current && sameSettings(current, config) ? current : config
+        )
         autoSendRef.current = config.asrAutoSend
         const ready = isConfigured(config)
         setMessages((current) =>
@@ -231,6 +254,19 @@ export default function Panel(): React.JSX.Element {
       })
       .catch(() => {})
   }, [t])
+
+  useEffect(() => {
+    if (settings) setPinned(settings.alwaysOnTop)
+  }, [settings])
+
+  const togglePin = useCallback((): void => {
+    const next = !pinned
+    setPinned(next)
+    void window.roulette
+      .setPanelPinned(next)
+      .then((actual) => setPinned(actual))
+      .catch(() => setPinned(!next))
+  }, [pinned])
 
   useEffect(() => {
     const finish = (id: number | null): void => {
@@ -384,16 +420,19 @@ export default function Panel(): React.JSX.Element {
       void window.roulette
         .getSettings()
         .then((config) => {
-          setSettings(config)
+          setSettings((current) =>
+            current && sameSettings(current, config) ? current : config
+          )
           autoSendRef.current = config.asrAutoSend
           const ready = isConfigured(config)
-          setMessages([
-            {
-              id: WELCOME_ID,
-              role: 'assistant',
-              text: ready ? t('welcome') : t('configureFirst')
-            }
-          ])
+          const welcome = ready ? t('welcome') : t('configureFirst')
+          setMessages((current) =>
+            current.length === 1 &&
+            current[0].id === WELCOME_ID &&
+            current[0].text === welcome
+              ? current
+              : [{ id: WELCOME_ID, role: 'assistant', text: welcome }]
+          )
           if (ready && payload.action === 'voice') {
             void beginRecording()
           }
@@ -545,6 +584,7 @@ export default function Panel(): React.JSX.Element {
       asrAutoSend: false,
       kbEnabled: true,
       webSearch: false,
+      alwaysOnTop: true,
       shortcuts: cloneShortcuts(DEFAULT_SHORTCUTS)
     }
     settingsDraft.populate(config)
@@ -653,6 +693,41 @@ export default function Panel(): React.JSX.Element {
   }
   sendRef.current = send
 
+  const retry = useCallback(
+    (messageId: number): void => {
+      if (busyRef.current) return
+      const current = messagesRef.current
+      const index = current.findIndex((message) => message.id === messageId)
+      if (index < 0) return
+      let userIndex = -1
+      for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+        if (current[cursor].role === 'user') {
+          userIndex = cursor
+          break
+        }
+      }
+      if (userIndex < 0) return
+
+      const user = current[userIndex]
+      const assistantId = Date.now()
+      streamingIdRef.current = assistantId
+      forceScrollRef.current = true
+      setMessages([
+        ...current.slice(0, userIndex + 1),
+        { id: assistantId, role: 'assistant', text: '', streaming: true }
+      ])
+      setBusy(true)
+      window.roulette.chat({
+        sessionId: sessionIdRef.current,
+        kind: KIND_BY_ACTION[action],
+        text: user.text,
+        image: user.image,
+        retry: true
+      })
+    },
+    [action]
+  )
+
   const onKeyDown = (
     event: ReactKeyboardEvent<HTMLTextAreaElement>
   ): void => {
@@ -717,10 +792,12 @@ export default function Panel(): React.JSX.Element {
       <PanelHeader
         view={view}
         title={headerTitle}
+        pinned={pinned}
         onBack={() => setView('chat')}
         onHistory={openHistory}
         onSettings={openSettings}
         onKb={openKb}
+        onTogglePin={togglePin}
         onMinimize={() => window.roulette.minimizePanel()}
         onClose={closePanel}
       />
@@ -734,6 +811,7 @@ export default function Panel(): React.JSX.Element {
           onInsert={insertAtCursor}
           onCopy={copy}
           onCopySource={copySource}
+          onRetry={retry}
           onOpenSettings={openSettings}
         />
       )}

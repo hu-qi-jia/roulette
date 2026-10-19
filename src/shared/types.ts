@@ -119,6 +119,7 @@ export interface AppSettings {
   asrAutoSend: boolean
   kbEnabled: boolean
   webSearch: boolean
+  alwaysOnTop: boolean
   shortcuts: ShortcutSettings
 }
 
@@ -130,6 +131,7 @@ export interface SettingsInput {
   asrAutoSend?: boolean
   kbEnabled?: boolean
   webSearch?: boolean
+  alwaysOnTop?: boolean
   shortcuts?: ShortcutSettings
 }
 
@@ -182,6 +184,8 @@ export interface ChatRequest {
   text: string
   /** Data URL of an image captured or attached in this turn. */
   image?: string
+  /** Regenerate the last assistant turn without appending the user message. */
+  retry?: boolean
 }
 
 export type ChatErrorCode = NonNullable<ChatError['code']>
@@ -225,8 +229,18 @@ export interface RouletteApi {
   cancelWheel(): void
   closePanel(): void
   minimizePanel(): void
+  setPanelPinned(pinned: boolean): Promise<boolean>
+  toggleFromBubble(): void
+  moveBubble(x: number, y: number): void
+  placeBubble(): void
   copyText(text: string): void
   insertText(text: string): void
+  beginTextDrag(text: string): void
+  prepareTextDrag(): void
+  cancelTextDrag(): void
+  onTextDragState(cb: (active: boolean) => void): () => void
+  onDragText(cb: (text: string) => void): () => void
+  getDragText(): Promise<string>
   onInsertFailed(cb: () => void): () => void
   getSettings(): Promise<AppSettings>
   getShortcuts(): Promise<ShortcutInfo>
@@ -272,5 +286,9 @@ export type HookEvent =
   | { type: 'foreground'; hwnd: number; class?: string }
   | { type: 'foreground-query'; hwnd: number; class?: string }
   | { type: 'trigger'; action: 'click' | 'history' }
+  | { type: 'drag-start' }
+  | { type: 'drag-none' }
+  | { type: 'drag-move'; x: number; y: number }
+  | { type: 'drag-up'; x: number; y: number }
   | { type: 'paste-result'; ok: boolean; method: string; class: string }
   | { type: 'capture-result'; ok: boolean; error?: string }

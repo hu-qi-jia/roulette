@@ -197,6 +197,22 @@ export function getMessages(sessionId: string): StoredMessage[] {
     .all(sessionId) as unknown as StoredMessage[]
 }
 
+/** Removes the newest message only when it is the assistant reply to this
+ *  exact user turn. A retry regenerates that turn; an error before the user
+ *  message reached the store must not delete an older answer. */
+export function deleteTrailingAssistant(sessionId: string, userText: string): void {
+  if (!db) return
+  const rows = db
+    .prepare(
+      `SELECT id, role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT 2`
+    )
+    .all(sessionId) as Array<{ id: number; role: string; content: string }>
+  const [last, previous] = rows
+  if (!last || last.role !== 'assistant') return
+  if (!previous || previous.role !== 'user' || previous.content !== userText) return
+  db.prepare('DELETE FROM messages WHERE id = ?').run(last.id)
+}
+
 /** Whether a session already carries an image, without loading its history. */
 export function sessionHasImages(sessionId: string): boolean {
   if (!db) return false

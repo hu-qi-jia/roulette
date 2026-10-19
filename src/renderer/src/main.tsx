@@ -5,7 +5,16 @@ import './styles/index.css'
 
 const params = new URLSearchParams(window.location.search)
 const windowParam = params.get('window')
-const route = windowParam === 'overlay' ? 'overlay' : windowParam === 'shot' ? 'shot' : 'panel'
+const route =
+  windowParam === 'overlay'
+    ? 'overlay'
+    : windowParam === 'shot'
+      ? 'shot'
+      : windowParam === 'drag'
+        ? 'drag'
+        : windowParam === 'bubble'
+          ? 'bubble'
+          : 'panel'
 document.body.dataset.route = route
 
 // Split by window so the overlay and shot windows do not parse the panel's
@@ -15,7 +24,11 @@ const loadRoute =
     ? import('./overlay/Overlay')
     : route === 'shot'
       ? import('./shot/Shot')
-      : import('./panel/Panel')
+      : route === 'drag'
+        ? import('./drag/Drag')
+        : route === 'bubble'
+          ? import('./bubble/Bubble')
+          : import('./panel/Panel')
 
 const root = ReactDOM.createRoot(document.getElementById('root')!)
 

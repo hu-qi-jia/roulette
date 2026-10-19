@@ -6,3 +6,4 @@ spike/node_modules/
 spike/hook/target/
 *.log
 .env
+.perf/

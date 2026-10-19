@@ -11,18 +11,20 @@ use windows_sys::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
     ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, SRCCOPY,
 };
+use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    mouse_event, GetAsyncKeyState, SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, VK_CONTROL, VK_LCONTROL, VK_LWIN, VK_MENU,
-    VK_RWIN, VK_SHIFT, VK_V,
+    mouse_event, GetAsyncKeyState, GetDoubleClickTime, SendInput, SetActiveWindow, INPUT,
+    INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    VK_CONTROL, VK_LBUTTON, VK_LCONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, VK_V,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetAncestor, GetClassNameW, GetForegroundWindow,
-    GetGUIThreadInfo, GetMessageW, GetWindowThreadProcessId, SendMessageTimeoutW, SetCursorPos,
-    SetForegroundWindow, SetWindowsHookExW, ShowWindow, TranslateMessage, WindowFromPoint, GA_ROOT,
-    GUITHREADINFO, MSG, SMTO_ABORTIFHUNG, SW_RESTORE, WH_MOUSE_LL, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_PASTE, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+    BringWindowToTop, CallNextHookEx, DispatchMessageW, GetAncestor, GetClassNameW,
+    GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, GetMessageW, GetWindowThreadProcessId,
+    SendMessageTimeoutW, SetCursorPos, SetForegroundWindow, SetWindowsHookExW, ShowWindow,
+    SwitchToThisWindow, TranslateMessage, WindowFromPoint, GA_ROOT, GUITHREADINFO, MSG,
+    SMTO_ABORTIFHUNG, SW_RESTORE, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_MBUTTONUP, WM_MOUSEMOVE, WM_PASTE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_XBUTTONDOWN,
+    WM_XBUTTONUP,
 };
 
 /// Mirrors Win32 MSLLHOOKSTRUCT (x64).
@@ -37,6 +39,8 @@ struct Msllhookstruct {
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static LAST_MOVE_MS: AtomicU64 = AtomicU64::new(0);
+static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
+static LAST_DRAG_MS: AtomicU64 = AtomicU64::new(0);
 static SENDER: OnceLock<mpsc::SyncSender<String>> = OnceLock::new();
 
 const MOD_CTRL: u32 = 1;
@@ -301,7 +305,75 @@ fn emit_paste_result(ok: bool, method: &str, class: &str) {
     ));
 }
 
-unsafe fn send_paste(hwnd: isize, click: Option<(i32, i32)>) {
+/// Bring a background window to the foreground without depending on the user
+/// clicking it first. Attaching to its input queue lets SetForegroundWindow
+/// succeed even though this process is not the foreground process.
+unsafe fn activate_target(root: HWND) {
+    let mut process_id: u32 = 0;
+    let target_thread = GetWindowThreadProcessId(root, &mut process_id);
+    let current_thread = GetCurrentThreadId();
+    let attached = target_thread != 0
+        && target_thread != current_thread
+        && AttachThreadInput(current_thread, target_thread, 1) != 0;
+
+    ShowWindow(root, SW_RESTORE);
+    BringWindowToTop(root);
+    if attached {
+        SetActiveWindow(root);
+    }
+    SetForegroundWindow(root);
+    // Windows blocks a background process from changing the foreground. A
+    // synthetic Alt tap releases that lock in most cases, avoiding an extra
+    // activation click on the target.
+    let mut alt_tapped = false;
+    if GetForegroundWindow() != root {
+        alt_tapped = true;
+        send_one_key(VK_MENU, false);
+        std::thread::sleep(Duration::from_millis(20));
+        send_one_key(VK_MENU, true);
+        std::thread::sleep(Duration::from_millis(20));
+        SetForegroundWindow(root);
+    }
+    SwitchToThisWindow(root, 1);
+    if attached {
+        AttachThreadInput(current_thread, target_thread, 0);
+    }
+    eprintln!(
+        "[hook] activate root={:?} attached={} alt={} foreground={:?}",
+        root,
+        attached,
+        alt_tapped,
+        GetForegroundWindow()
+    );
+}
+
+unsafe fn click_at(root: HWND, x: i32, y: i32) -> bool {
+    let point = POINT { x, y };
+    let under = WindowFromPoint(point);
+    let same_window = !under.is_null()
+        && (under == root || GetAncestor(under, GA_ROOT) == root);
+    if !same_window {
+        eprintln!("[hook] skip click: point is outside the target window");
+        return false;
+    }
+    // A drop arrives with the cursor already at the release point; moving it
+    // again only adds latency. Otherwise keep the short settle pause.
+    let mut current = POINT { x: 0, y: 0 };
+    if GetCursorPos(&mut current) == 0 || current.x != x || current.y != y {
+        SetCursorPos(x, y);
+        std::thread::sleep(Duration::from_millis(60));
+    } else {
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+    std::thread::sleep(Duration::from_millis(40));
+    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+    std::thread::sleep(Duration::from_millis(160));
+    eprintln!("[hook] clicked {}x{} to restore focus", x, y);
+    true
+}
+
+unsafe fn send_paste(hwnd: isize, click: Option<(i32, i32)>, click_first: bool) {
     let mut target: HWND = hwnd as HWND;
     if target.is_null() {
         target = GetForegroundWindow();
@@ -323,28 +395,105 @@ unsafe fn send_paste(hwnd: isize, click: Option<(i32, i32)>) {
     eprintln!("[hook] paste target={:?} root={:?}", target, root);
 
     ShowWindow(root, SW_RESTORE);
-    SetForegroundWindow(root);
 
-    // The target must really own the foreground before keystrokes are sent.
-    let deadline = Instant::now() + Duration::from_millis(1200);
-    loop {
-        let foreground = GetForegroundWindow();
-        if foreground == root || GetAncestor(foreground, GA_ROOT) == root {
-            break;
+    let foreground_ok = if click_first {
+        // A drop should not need a preparatory click in the target. Pull the
+        // window forward first, then click so the click places the caret rather
+        // than being consumed as an activation click.
+        activate_target(root);
+
+        let activate_deadline = Instant::now() + Duration::from_millis(300);
+        let mut activated = false;
+        loop {
+            let foreground = GetForegroundWindow();
+            if foreground == root || GetAncestor(foreground, GA_ROOT) == root {
+                activated = true;
+                break;
+            }
+            if Instant::now() >= activate_deadline {
+                break;
+            }
+            SetForegroundWindow(root);
+            std::thread::sleep(Duration::from_millis(25));
         }
-        if Instant::now() >= deadline {
-            break;
+        eprintln!("[hook] drop activated before click={}", activated);
+        if activated {
+            // Let the target finish activating its edit control.
+            std::thread::sleep(Duration::from_millis(80));
         }
+
+        if let Some((x, y)) = click {
+            click_at(root, x, y);
+        }
+
+        // The click itself also activates the target when the attach path was
+        // blocked, so wait for it before deciding whether the paste succeeded.
+        let deadline = Instant::now() + Duration::from_millis(350);
+        let mut foreground_now = false;
+        loop {
+            let foreground = GetForegroundWindow();
+            if foreground == root || GetAncestor(foreground, GA_ROOT) == root {
+                foreground_now = true;
+                break;
+            }
+            if Instant::now() >= deadline {
+                eprintln!("[hook] foreground after click not owned by target");
+                break;
+            }
+            SetForegroundWindow(root);
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        // If activation had to happen via the click, the click was consumed as
+        // the activation click and did not place the caret. Wait past the
+        // double-click window, then click once more as a normal click.
+        if !activated && foreground_now {
+            if let Some((x, y)) = click {
+                // click_at already waited 160ms after the first release; only
+                // the remainder of the double-click interval is needed.
+                let delay = GetDoubleClickTime().saturating_sub(140).max(260) as u64 + 60;
+                std::thread::sleep(Duration::from_millis(delay));
+                click_at(root, x, y);
+            }
+        }
+
+        foreground_now
+    } else {
         SetForegroundWindow(root);
-        std::thread::sleep(Duration::from_millis(60));
+
+        // The target must really own the foreground before keystrokes are sent.
+        let deadline = Instant::now() + Duration::from_millis(1200);
+        loop {
+            let foreground = GetForegroundWindow();
+            if foreground == root || GetAncestor(foreground, GA_ROOT) == root {
+                break;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            SetForegroundWindow(root);
+            std::thread::sleep(Duration::from_millis(60));
+        }
+
+        // Let the target reactivate its edit control.
+        std::thread::sleep(Duration::from_millis(150));
+
+        let foreground = GetForegroundWindow();
+        let ok = foreground == root || GetAncestor(foreground, GA_ROOT) == root;
+        eprintln!("[hook] foreground={:?} ok={}", foreground, ok);
+        ok
+    };
+
+    if click_first {
+        // Native controls can need a beat after the final click before their
+        // caret/focus is ready for WM_PASTE.
+        std::thread::sleep(Duration::from_millis(120));
     }
-
-    // Let the target reactivate its edit control.
-    std::thread::sleep(Duration::from_millis(150));
-
-    let foreground = GetForegroundWindow();
-    let foreground_ok = foreground == root || GetAncestor(foreground, GA_ROOT) == root;
-    eprintln!("[hook] foreground={:?} ok={}", foreground, foreground_ok);
+    eprintln!(
+        "[hook] foreground before paste={:?} root={:?}",
+        GetForegroundWindow(),
+        root
+    );
 
     let focus = focused_control(root);
     let class = class_name(focus);
@@ -353,25 +502,13 @@ unsafe fn send_paste(hwnd: isize, click: Option<(i32, i32)>) {
     if is_edit_class(&class) {
         let ok = send_wm_paste(root as isize);
         eprintln!("[hook] wm_paste ok={}", ok);
-        emit_paste_result(ok, "wm_paste", &class);
+        emit_paste_result(ok, if click_first { "drop" } else { "wm_paste" }, &class);
     } else {
         // Custom editors (Chromium, terminals) lose their internal focus when
         // the panel takes over. A click at the wheel's origin restores it.
-        if let Some((x, y)) = click {
-            let point = POINT { x, y };
-            let under = WindowFromPoint(point);
-            let same_window = !under.is_null()
-                && (under == root || GetAncestor(under, GA_ROOT) == root);
-            if same_window {
-                SetCursorPos(x, y);
-                std::thread::sleep(Duration::from_millis(60));
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                std::thread::sleep(Duration::from_millis(40));
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                std::thread::sleep(Duration::from_millis(160));
-                eprintln!("[hook] clicked {}x{} to restore focus", x, y);
-            } else {
-                eprintln!("[hook] skip click: point is outside the target window");
+        if !click_first {
+            if let Some((x, y)) = click {
+                click_at(root, x, y);
             }
         }
 
@@ -380,13 +517,41 @@ unsafe fn send_paste(hwnd: isize, click: Option<(i32, i32)>) {
         if is_edit_class(&class) {
             let ok = send_wm_paste(root as isize);
             eprintln!("[hook] wm_paste after click ok={}", ok);
-            emit_paste_result(ok, "wm_paste_after_click", &class);
+            emit_paste_result(ok, if click_first { "drop" } else { "wm_paste_after_click" }, &class);
         } else {
             let sent = send_ctrl_v();
             eprintln!("[hook] SendInput events={}", sent);
-            emit_paste_result(foreground_ok && sent > 0, "ctrl_v", &class);
+            emit_paste_result(
+                foreground_ok && sent > 0,
+                if click_first { "drop" } else { "ctrl_v" },
+                &class,
+            );
         }
     }
+}
+
+/// Paste at an explicit physical screen point: resolve the top-level window
+/// under it, focus it, click at the point, then paste. Used by drag-to-paste.
+unsafe fn send_drop(x: i32, y: i32) {
+    let point = POINT { x, y };
+    let under = WindowFromPoint(point);
+    if under.is_null() {
+        emit_paste_result(false, "drop", "");
+        return;
+    }
+    let ancestor = GetAncestor(under, GA_ROOT);
+    let root = if ancestor.is_null() { under } else { ancestor };
+    let class = class_name(root);
+    if matches!(
+        class.as_str(),
+        "Progman" | "WorkerW" | "Shell_TrayWnd" | "Windows.UI.Core.CoreWindow"
+    ) {
+        eprintln!("[hook] drop target is the desktop: {}", class);
+        emit_paste_result(false, "drop", &class);
+        return;
+    }
+    eprintln!("[hook] drop at {}x{} root={:?} class={}", x, y, root, class);
+    send_paste(root as isize, Some((x, y)), true);
 }
 
 unsafe fn focused_control(hwnd: HWND) -> HWND {
@@ -474,7 +639,34 @@ fn start_stdin_reader() {
                         _ => None,
                     };
                     eprintln!("[hook] paste command hwnd={} click={:?}", hwnd, click);
-                    unsafe { send_paste(hwnd, click) };
+                    unsafe { send_paste(hwnd, click, false) };
+                }
+                Some("dropat") => {
+                    let x = parts.next().and_then(|value| value.parse::<i32>().ok());
+                    let y = parts.next().and_then(|value| value.parse::<i32>().ok());
+                    match (x, y) {
+                        (Some(x), Some(y)) => unsafe { send_drop(x, y) },
+                        _ => emit_paste_result(false, "drop", ""),
+                    }
+                }
+                Some("dragstart") => {
+                    // The renderer reports pointer-down; only track when the
+                    // button is still physically held.
+                    let down =
+                        unsafe { (GetAsyncKeyState(VK_LBUTTON as i32) as u16 & 0x8000) != 0 };
+                    if down
+                        && !ACTIVE.load(Ordering::Relaxed)
+                        && !DRAG_ACTIVE.swap(true, Ordering::Relaxed)
+                    {
+                        LAST_DRAG_MS.store(now_ms(), Ordering::Relaxed);
+                        emit(r#"{"type":"drag-start"}"#.to_string());
+                    } else {
+                        DRAG_ACTIVE.store(false, Ordering::Relaxed);
+                        emit(r#"{"type":"drag-none"}"#.to_string());
+                    }
+                }
+                Some("dragcancel") => {
+                    DRAG_ACTIVE.store(false, Ordering::Relaxed);
                 }
                 Some("foreground") => {
                     let hwnd = unsafe { GetForegroundWindow() };
@@ -624,6 +816,17 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
             }
             // Do NOT swallow moves: the cursor must actually move.
         }
+        if DRAG_ACTIVE.load(Ordering::Relaxed) {
+            let now = now_ms();
+            let last = LAST_DRAG_MS.load(Ordering::Relaxed);
+            if now.saturating_sub(last) >= 16 {
+                LAST_DRAG_MS.store(now, Ordering::Relaxed);
+                emit(format!(
+                    r#"{{"type":"drag-move","x":{},"y":{}}}"#,
+                    info.pt.x, info.pt.y
+                ));
+            }
+        }
         return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
     }
 
@@ -677,6 +880,16 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
     }
 
     // Button up.
+    if DRAG_ACTIVE.load(Ordering::Relaxed) && button == BTN_LEFT {
+        DRAG_ACTIVE.store(false, Ordering::Relaxed);
+        emit(format!(
+            r#"{{"type":"drag-up","x":{},"y":{}}}"#,
+            info.pt.x, info.pt.y
+        ));
+        // Swallow the release so it cannot click the drop target: the host
+        // clicks at the drop point itself once the panel is out of the way.
+        return 1;
+    }
     if ACTIVE.load(Ordering::Relaxed) {
         let hold = HOLD_CONFIG.load(Ordering::Relaxed);
         if button == trigger_button(hold) {

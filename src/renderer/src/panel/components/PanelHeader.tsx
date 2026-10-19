@@ -6,6 +6,8 @@ import {
   DatabaseIcon,
   HistoryIcon,
   MinimizeIcon,
+  PinIcon,
+  PinOffIcon,
   SettingsIcon
 } from '../../icons'
 import type { PanelView } from '../types'
@@ -13,10 +15,12 @@ import type { PanelView } from '../types'
 interface PanelHeaderProps {
   view: PanelView
   title: string
+  pinned: boolean
   onBack: () => void
   onHistory: () => void
   onSettings: () => void
   onKb: () => void
+  onTogglePin: () => void
   onMinimize: () => void
   onClose: () => void
 }
@@ -24,10 +28,12 @@ interface PanelHeaderProps {
 export function PanelHeader({
   view,
   title,
+  pinned,
   onBack,
   onHistory,
   onSettings,
   onKb,
+  onTogglePin,
   onMinimize,
   onClose
 }: PanelHeaderProps): React.JSX.Element {
@@ -102,6 +108,15 @@ export function PanelHeader({
           <SettingsIcon />
         </button>
       )}
+
+      <button
+        className={`icon pin-button ${pinned ? 'active' : ''}`}
+        title={pinned ? t('unpinWindow') : t('pinWindow')}
+        aria-pressed={pinned}
+        onClick={onTogglePin}
+      >
+        {pinned ? <PinIcon /> : <PinOffIcon />}
+      </button>
 
       <button
         className="icon minimize-button"

@@ -6,8 +6,11 @@ import {
   dialog,
   globalShortcut,
   ipcMain,
+  Menu,
+  nativeImage,
   screen,
   session,
+  Tray,
   type Display,
   type WebContents
 } from 'electron'
@@ -32,7 +35,14 @@ import {
   searchWeb,
   supportsHostWebSearch
 } from './websearch'
-import { getApiKey, getPublicSettings, saveSettings } from './settings'
+import {
+  getApiKey,
+  getBubblePosition,
+  getPublicSettings,
+  saveSettings,
+  setAlwaysOnTopSetting,
+  setBubblePosition
+} from './settings'
 import {
   cloneShortcuts,
   DEFAULT_SHORTCUTS,
@@ -47,6 +57,7 @@ import {
   closeStore,
   deleteKbDocument,
   deleteSession,
+  deleteTrailingAssistant,
   ensureSession,
   getMessages,
   getSession,
@@ -57,6 +68,9 @@ import {
   sessionHasImages
 } from './store'
 import {
+  BUBBLE_SIZE,
+  createBubbleWindow,
+  createDragWindow,
   createOverlayWindow,
   createPanelWindow,
   createShotWindow,
@@ -122,6 +136,16 @@ const KIND_BY_SECTOR: Record<Sector, SessionKind> = {
 let overlay: BrowserWindow | null = null
 let panel: BrowserWindow | null = null
 let shot: BrowserWindow | null = null
+let bubble: BrowserWindow | null = null
+let bubbleTimer: NodeJS.Timeout | null = null
+let tray: Tray | null = null
+let trayInteractedAt = 0
+let quitting = false
+let dragGhost: BrowserWindow | null = null
+let dragGhostPending: string | null = null
+let dragGhostWarmTimer: NodeJS.Timeout | null = null
+/** Non-null while the native hook is tracking a text drag. */
+let textDrag: { text: string } | null = null
 const hook = new HookClient()
 
 let active = false
@@ -147,6 +171,8 @@ let shortcutActive: Record<ShortcutAction, string | null> = {
 }
 let shortcutErrors: Partial<Record<ShortcutAction, string>> = {}
 let shortcutCapture = false
+let panelPinned = true
+let dialogOpen = false
 const activeChats = new Map<string, AbortController>()
 
 function toDip(x: number, y: number): { x: number; y: number } {
@@ -161,6 +187,14 @@ function toDip(x: number, y: number): { x: number; y: number } {
   const display = screen.getDisplayNearestPoint({ x, y })
   const scale = display.scaleFactor || 1
   return { x: x / scale, y: y / scale }
+}
+
+function toPhysical(point: { x: number; y: number }): { x: number; y: number } {
+  try {
+    return screen.dipToScreenPoint(point)
+  } catch {
+    return point
+  }
 }
 
 function hookPath(): string {
@@ -187,6 +221,171 @@ function sendToOverlay(channel: string, payload?: unknown): void {
 function sendToPanel(channel: string, payload?: unknown): void {
   if (!panel || panel.webContents.isLoading()) return
   panel.webContents.send(channel, payload)
+}
+
+function applyPanelPin(pinned: boolean): void {
+  panelPinned = pinned
+  panel?.setAlwaysOnTop(pinned, 'floating')
+  console.log('[panel] always on top:', pinned)
+}
+
+/** Unpinned panels behave like ordinary windows and get out of the way when
+ *  another app is activated. Native drags, dialogs, the launcher and the tray
+ *  keep it open. */
+function minimizePanelIfUnpinned(): void {
+  setTimeout(() => {
+    if (panelPinned || !panel || panel.isMinimized() || !panel.isVisible()) return
+    if (textDrag || shotActive || dialogOpen) return
+    if (panel.isFocused() || bubble?.isFocused()) return
+    // Clicking the tray blurs the panel; do not race the tray's own toggle.
+    if (Date.now() - trayInteractedAt < 800) return
+    console.log('[panel] minimizing (unpinned)')
+    panel.minimize()
+  }, 120)
+}
+
+function bubbleDefaultPosition(): { x: number; y: number } {
+  const area = screen.getPrimaryDisplay().workArea
+  return {
+    x: area.x + area.width - BUBBLE_SIZE - 24,
+    y: area.y + area.height - BUBBLE_SIZE - 24
+  }
+}
+
+/** Keep the whole launcher on a display, even after a DPI or layout change. */
+function clampBubblePosition(point: { x: number; y: number }): { x: number; y: number } {
+  const area = screen.getDisplayNearestPoint({
+    x: Math.round(point.x + BUBBLE_SIZE / 2),
+    y: Math.round(point.y + BUBBLE_SIZE / 2)
+  }).workArea
+  return {
+    x: Math.round(Math.min(Math.max(point.x, area.x + 8), area.x + area.width - BUBBLE_SIZE - 8)),
+    y: Math.round(Math.min(Math.max(point.y, area.y + 8), area.y + area.height - BUBBLE_SIZE - 8))
+  }
+}
+
+/** Created once, shortly after startup, so it never delays the first paint. */
+function ensureBubble(): void {
+  if (bubble) return
+  const saved = getBubblePosition()
+  const at = saved ? clampBubblePosition(saved) : bubbleDefaultPosition()
+  const win = createBubbleWindow(at)
+  bubble = win
+  win.webContents.on('did-finish-load', () => {
+    if (bubble !== win) return
+    win.showInactive()
+    console.log('[bubble] ready')
+    captureIfRequested(win, 'out/bubble-capture.png')
+  })
+  win.on('closed', () => {
+    if (bubble === win) bubble = null
+  })
+  // The launcher has no close affordance; Alt+F4 should leave it in place.
+  keepWindowResident(win, () => {})
+}
+
+function scheduleBubble(): void {
+  if (bubble || bubbleTimer) return
+  bubbleTimer = setTimeout(() => {
+    bubbleTimer = null
+    ensureBubble()
+  }, 1500)
+  bubbleTimer.unref?.()
+}
+
+/** Hide to the tray and end the current turn. Minimize (the header button)
+ *  keeps the turn running; close/hide does not leave a hidden stream behind. */
+function hidePanel(): void {
+  cancelTextDrag()
+  for (const controller of activeChats.values()) controller.abort()
+  activeChats.clear()
+  panel?.hide()
+}
+
+/** The launcher and tray click toggle: visible -> minimize, minimized/hidden -> show. */
+function togglePanelFromLauncher(): void {
+  if (!panel) return
+  console.log('[launcher] toggle')
+  if (panel.isMinimized()) {
+    panel.restore()
+    panel.focus()
+    return
+  }
+  if (panel.isVisible()) {
+    panel.minimize()
+    return
+  }
+  openPanel('text')
+}
+
+/** Tray menu "open": never minimizes a panel that is already on screen. */
+function showPanelFromLauncher(): void {
+  if (!panel) return
+  if (panel.isMinimized()) {
+    panel.restore()
+    panel.focus()
+    return
+  }
+  if (panel.isVisible()) {
+    panel.focus()
+    return
+  }
+  openPanel('text')
+}
+
+function trayIconPath(): string {
+  const base = app.isPackaged ? process.resourcesPath : app.getAppPath()
+  return path.join(base, 'resources', 'tray.png')
+}
+
+function createTray(): void {
+  if (tray) return
+  const icon = nativeImage.createFromPath(trayIconPath())
+  if (icon.isEmpty()) {
+    console.warn('[tray] icon not found:', trayIconPath())
+    return
+  }
+  tray = new Tray(icon)
+  tray.setToolTip('Roulette')
+  const zh = app.getLocale().toLowerCase().startsWith('zh')
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      {
+        label: zh ? '打开轮盘' : 'Open Roulette',
+        click: showPanelFromLauncher
+      },
+      {
+        label: zh ? '隐藏面板' : 'Hide panel',
+        click: hidePanel
+      },
+      { type: 'separator' },
+      {
+        label: zh ? '退出' : 'Quit',
+        click: () => {
+          quitting = true
+          app.quit()
+        }
+      }
+    ])
+  )
+  tray.on('click', () => {
+    trayInteractedAt = Date.now()
+    togglePanelFromLauncher()
+  })
+  tray.on('right-click', () => {
+    trayInteractedAt = Date.now()
+  })
+  console.log('[tray] ready')
+}
+
+/** Alt+F4 and other close paths hide resident windows instead of destroying
+ *  them, so the tray and the global hook keep working. */
+function keepWindowResident(win: BrowserWindow, onClose: () => void): void {
+  win.on('close', (event) => {
+    if (quitting) return
+    event.preventDefault()
+    onClose()
+  })
 }
 
 function emitChatError(
@@ -335,12 +534,14 @@ async function handleChat(request: ChatRequest): Promise<void> {
   }
 
   let imagePath: string | null = null
-  if (request.image) {
+  const saveRequestImage = (): boolean => {
+    if (!request.image) return true
     imagePath = saveImage(request.image)
     if (!imagePath) {
       emitChatError(request.sessionId, 'The attached image could not be read.', 'image-unreadable')
-      return
+      return false
     }
+    return true
   }
 
   ensureSession({
@@ -348,7 +549,22 @@ async function handleChat(request: ChatRequest): Promise<void> {
     kind: request.kind,
     appName: request.appName ?? null
   })
-  appendMessage(request.sessionId, 'user', text, imagePath)
+  if (request.retry) {
+    // Regenerate the last answer: drop it from history, but keep the user
+    // message that prompted it so the model sees the same turn.
+    deleteTrailingAssistant(request.sessionId, text)
+    const stored = getMessages(request.sessionId)
+    const last = stored[stored.length - 1]
+    // The user turn is normally already stored. It is missing when the first
+    // attempt failed before reaching the store (for example, no API key).
+    if (!last || last.role !== 'user' || last.content !== text) {
+      if (!saveRequestImage()) return
+      appendMessage(request.sessionId, 'user', text, imagePath)
+    }
+  } else {
+    if (!saveRequestImage()) return
+    appendMessage(request.sessionId, 'user', text, imagePath)
+  }
   // The store is the single source of truth for the conversation, so a resumed
   // session can continue with its full history.
   const history = toChatHistory(getMessages(request.sessionId))
@@ -518,7 +734,9 @@ function windowHandle(win: BrowserWindow | null): number {
 
 function isOurWindow(hwnd: number): boolean {
   if (!hwnd) return false
-  return [panel, overlay, shot].some((win) => windowHandle(win) === hwnd)
+  return [panel, overlay, shot, bubble, dragGhost].some(
+    (win) => windowHandle(win) === hwnd
+  )
 }
 
 const DESKTOP_CLASSES = new Set([
@@ -627,6 +845,148 @@ async function insertText(text: string): Promise<void> {
     await clipboard.writeText(text).catch(() => {})
     revealPanel()
     sendToPanel('insert:failed')
+  }
+}
+
+const DRAG_GHOST_WIDTH = 320
+const DRAG_GHOST_HEIGHT = 104
+
+function ensureDragGhost(): BrowserWindow {
+  if (dragGhost) return dragGhost
+  const win = createDragWindow()
+  dragGhost = win
+  win.webContents.on('did-finish-load', () => {
+    if (dragGhost !== win || dragGhostPending === null) return
+    win.webContents.send('drag:text', dragGhostPending)
+  })
+  keepWindowResident(win, cleanupTextDrag)
+  return win
+}
+
+/** Load the preview window in the background so the first drag is instant. */
+function warmDragGhost(): void {
+  if (dragGhost || dragGhostWarmTimer) return
+  dragGhostWarmTimer = setTimeout(() => {
+    dragGhostWarmTimer = null
+    ensureDragGhost()
+  }, 250)
+  dragGhostWarmTimer.unref?.()
+}
+
+function positionDragGhost(point: { x: number; y: number }): void {
+  if (!dragGhost) return
+  const area = screen.getDisplayNearestPoint(point).workArea
+  const x = Math.min(
+    Math.max(point.x + 18, area.x + 8),
+    area.x + area.width - DRAG_GHOST_WIDTH - 8
+  )
+  const y = Math.min(
+    Math.max(point.y + 20, area.y + 8),
+    area.y + area.height - DRAG_GHOST_HEIGHT - 8
+  )
+  dragGhost.setPosition(Math.round(x), Math.round(y), false)
+}
+
+function showDragGhost(text: string): void {
+  const win = ensureDragGhost()
+  const preview = text.length > 280 ? `${text.slice(0, 280)}…` : text
+  dragGhostPending = preview
+  if (!win.webContents.isLoading()) win.webContents.send('drag:text', preview)
+  positionDragGhost(screen.getCursorScreenPoint())
+  if (!win.isVisible()) win.showInactive()
+  captureIfRequested(win, 'out/drag-ghost-capture.png')
+}
+
+function cleanupTextDrag(): void {
+  textDrag = null
+  dragGhost?.hide()
+  sendToPanel('drag:state', false)
+}
+
+function beginTextDrag(text: string): void {
+  if (textDrag) return
+  const value = String(text ?? '')
+  if (!value.trim()) return
+  console.log('[drag] begin chars:', value.length)
+  if (!hook.isRunning()) {
+    sendToPanel('drag:state', false)
+    return
+  }
+  textDrag = { text: value }
+  // Start loading the preview immediately so the first drag is not delayed.
+  ensureDragGhost()
+  if (!hook.send('dragstart')) cleanupTextDrag()
+}
+
+function cancelTextDrag(): void {
+  if (!textDrag) return
+  console.log('[drag] cancel')
+  hook.send('dragcancel')
+  cleanupTextDrag()
+}
+
+function pointInWindow(
+  win: BrowserWindow | null,
+  point: { x: number; y: number }
+): boolean {
+  if (!win || !win.isVisible()) return false
+  const bounds = win.getBounds()
+  return (
+    point.x >= bounds.x &&
+    point.y >= bounds.y &&
+    point.x < bounds.x + bounds.width &&
+    point.y < bounds.y + bounds.height
+  )
+}
+
+/** Drops text at a physical screen point. The native helper resolves the
+ *  window under that point, focuses it, clicks to place the caret, and pastes. */
+async function dropTextAt(text: string, x: number, y: number): Promise<void> {
+  const started = Date.now()
+  console.log('[drag] drop at', Math.round(x), Math.round(y), 'chars:', text.length)
+  const fail = async (): Promise<void> => {
+    await clipboard.writeText(text).catch(() => {})
+    revealPanel()
+    sendToPanel('insert:failed')
+  }
+
+  try {
+    if (!hook.isRunning()) {
+      await fail()
+      return
+    }
+
+    const snapshot = await snapshotClipboard()
+    await clipboard.writeText(text)
+    panel?.hide()
+    // The drop point is outside the panel and the native helper activates the
+    // target itself, so it only needs the hide to be committed.
+    await delay(20)
+
+    const resultPromise = hook.waitFor((event) => event.type === 'paste-result', 5000)
+    const sent = hook.send(`dropat ${Math.round(x)} ${Math.round(y)}`)
+    if (!sent) {
+      void resultPromise.catch(() => {})
+      await fail()
+      return
+    }
+
+    const result = await resultPromise.catch((error) => {
+      console.warn('[drag] no paste result', error)
+      return null
+    })
+    if (!result || result.type !== 'paste-result' || !result.ok) {
+      console.warn('[drag] paste failed', result)
+      await fail()
+      return
+    }
+
+    await delay(250)
+    await restoreClipboard(snapshot)
+    console.log('[drag] pasted', text.length, 'chars in', Date.now() - started, 'ms')
+  } catch (error) {
+    console.error('[drag] failed', error)
+    await fail()
   }
 }
 
@@ -782,12 +1142,18 @@ function finishSelection(result: Sector | 'cancel'): void {
     return
   }
   sendToOverlay('wheel:result', result)
+  // Start the panel immediately: its first paint happens under the wheel's
+  // result animation, so hiding the wheel reveals an already-rendered window
+  // instead of leaving a blank frame (which reads as a stutter).
+  if (result === 'history') openPanel('text', { openHistory: true })
+  else if (result !== 'cancel') openPanel(result)
   hideTimer = setTimeout(() => {
-    // Show the panel before hiding the wheel: the panel's first paint then
-    // happens under the wheel instead of leaving a blank frame on screen.
-    if (result === 'history') openPanel('text', { openHistory: true })
-    else if (result !== 'cancel') openPanel(result)
     hideWheel()
+    // The overlay may still own the foreground until it hides. Focus the
+    // panel again afterwards so a minimized window reliably comes forward.
+    if (result !== 'cancel' && panel?.isVisible() && !panel.isMinimized()) {
+      panel.focus()
+    }
   }, 200)
 }
 
@@ -1167,7 +1533,7 @@ function showPanelWindow(): void {
 }
 
 function schedulePanelShow(): void {
-  if (!panel || panel.isVisible()) return
+  if (!panel) return
   panelShowPending = true
   if (panelShowTimer) clearTimeout(panelShowTimer)
   panelShowTimer = setTimeout(showPanelWindow, 120)
@@ -1195,8 +1561,12 @@ function openPanel(
 ): void {
   if (!panel) return
   const started = PERF ? performance.now() : 0
-  const wasVisible = panel.isVisible()
-  if (panel.isMinimized()) panel.restore()
+  const wasMinimized = panel.isMinimized()
+  // A minimized window reports isVisible() inconsistently on Windows. Treat
+  // "restored from minimize" as a fresh reveal so the ack path shows and
+  // focuses it even when restore() already made it visible.
+  const wasVisible = panel.isVisible() && !wasMinimized
+  if (wasMinimized) panel.restore()
   if (!panel.webContents.isLoading()) {
     panel.webContents.send('panel:open', {
       action,
@@ -1228,6 +1598,7 @@ function openPanel(
   maybeRunHistoryOpenTest()
   maybeRunHistoryActionsTest()
   maybeRunKbOpenTest()
+  maybeWriteDragTestTarget()
 }
 
 // Dev-only: clicks the knowledge-base button and captures the page.
@@ -1446,6 +1817,89 @@ function maybeStopTestRecording(action: Sector): void {
   }, ms + 4500)
 }
 
+// Dev-only: writes the on-screen position of the newest completed answer so a
+// script can drive a real mouse drag without guessing the panel layout.
+function maybeWriteDragTestTarget(): void {
+  const file = process.env.ROULETTE_TEST_DRAG_FILE
+  if (!file || !panel) return
+  const startedAt = Date.now()
+  let written = false
+  const timer = setInterval(() => {
+    if (!panel || written || Date.now() - startedAt > 20000) {
+      clearInterval(timer)
+      return
+    }
+    panel.webContents
+      .executeJavaScript(
+        `(async () => {
+          const find = () => {
+            const cards = document.querySelectorAll('.answer');
+            const answer = cards[cards.length - 1];
+            return answer && answer.querySelector('.answer-actions') ? answer : null;
+          };
+          if (!find()) return null;
+          // Wait for the conversation's smooth scroll to settle before
+          // measuring; the action row appears before the last scroll frame.
+          await new Promise((resolve) => setTimeout(resolve, 800));
+          const answer = find();
+          if (!answer) return null;
+          const rect = answer.getBoundingClientRect();
+          const handle = answer.querySelector('.drag-handle');
+          const handleRect = handle instanceof HTMLElement ? handle.getBoundingClientRect() : rect;
+          return {
+            answer: { x: rect.left + rect.width / 2, y: rect.top + 48 },
+            handle: {
+              x: handleRect.left + handleRect.width / 2,
+              y: handleRect.top + handleRect.height / 2
+            },
+            text: {
+              x: rect.left + 45,
+              y: rect.top + 22,
+              toX: rect.left + rect.width - 30
+            }
+          };
+        })()`
+      )
+      .then(
+        (
+          point: {
+            answer: { x: number; y: number }
+            handle: { x: number; y: number }
+            text: { x: number; y: number; toX: number }
+          } | null
+        ) => {
+          if (!point || !panel || written) return
+          written = true
+          clearInterval(timer)
+          const bounds = panel.getBounds()
+          const dip = { x: bounds.x, y: bounds.y }
+          const target = {
+            answer: toPhysical({
+              x: dip.x + point.answer.x,
+              y: dip.y + point.answer.y
+            }),
+            handle: toPhysical({
+              x: dip.x + point.handle.x,
+              y: dip.y + point.handle.y
+            }),
+            text: toPhysical({
+              x: dip.x + point.text.x,
+              y: dip.y + point.text.y
+            }),
+            textEnd: toPhysical({
+              x: dip.x + point.text.toX,
+              y: dip.y + point.text.y
+            }),
+            panel: toPhysical(dip)
+          }
+          fs.writeFileSync(path.join(app.getAppPath(), file), JSON.stringify(target))
+          console.log('[test] drag target', JSON.stringify(target))
+        }
+      )
+      .catch(() => {})
+  }, 300)
+}
+
 // Dev-only: clicks the composer's camera button so the panel capture flow can
 // be exercised without locating the window on screen.
 function maybeRunPanelShotTest(): void {
@@ -1486,6 +1940,36 @@ function onHookEvent(ev: HookEvent): void {
       if (ev.action === 'click') toggleClickWheel()
       else if (ev.action === 'history') openHistoryPanel()
       break
+
+    case 'drag-start':
+      if (!textDrag) break
+      console.log('[drag] tracked')
+      showDragGhost(textDrag.text)
+      sendToPanel('drag:state', true)
+      break
+
+    case 'drag-none':
+      if (!textDrag) break
+      console.log('[drag] not tracked (button already released)')
+      cleanupTextDrag()
+      break
+
+    case 'drag-move':
+      if (!textDrag) break
+      positionDragGhost(toDip(ev.x, ev.y))
+      break
+
+    case 'drag-up': {
+      if (!textDrag) break
+      const text = textDrag.text
+      const point = toDip(ev.x, ev.y)
+      const droppedOnPanel = pointInWindow(panel, point) || pointInWindow(bubble, point)
+      console.log('[drag] up at', ev.x, ev.y, 'onPanel:', droppedOnPanel)
+      cleanupTextDrag()
+      if (droppedOnPanel) break
+      void dropTextAt(text, ev.x, ev.y)
+      break
+    }
 
     case 'move': {
       if (!active || mode !== 'hold') break
@@ -1528,7 +2012,9 @@ function configurePermissions(): void {
     Boolean(contents) &&
     (contents === panel?.webContents ||
       contents === overlay?.webContents ||
-      contents === shot?.webContents)
+      contents === shot?.webContents ||
+      contents === bubble?.webContents ||
+      contents === dragGhost?.webContents)
 
   session.defaultSession.setPermissionRequestHandler((contents, permission, callback) => {
     callback(permission === 'media' && isOurWindow(contents))
@@ -1551,6 +2037,12 @@ function bootstrap(): void {
   perf('panel window created')
   shot = createShotWindow()
   perf('shot window created')
+  applyPanelPin(getPublicSettings().alwaysOnTop)
+  panel.on('blur', minimizePanelIfUnpinned)
+  keepWindowResident(panel, hidePanel)
+  keepWindowResident(overlay, () => hideWheel())
+  keepWindowResident(shot, () => cancelShot())
+  createTray()
 
   configurePermissions()
   setKbProgressSink((status) => sendToPanel('kb:progress', status))
@@ -1581,6 +2073,14 @@ function bootstrap(): void {
     console.log('[panel] ready')
     perf('panel ready')
   })
+  // Escape while carrying text cancels the drag, not the whole panel. Handle
+  // it before the renderer so the panel cannot close mid-drag.
+  panel.webContents.on('before-input-event', (event, input) => {
+    if (textDrag && input.type === 'keyDown' && input.key === 'Escape') {
+      event.preventDefault()
+      cancelTextDrag()
+    }
+  })
   shot.webContents.on('did-finish-load', () => {
     console.log('[shot] ready')
     perf('shot ready')
@@ -1602,6 +2102,7 @@ function bootstrap(): void {
     console.warn('[hook] sidecar stopped; keyboard click mode still works')
     shortcutActive.hold = null
     shortcutErrors.hold = 'hook-unavailable'
+    if (textDrag) cleanupTextDrag()
   })
 
   if (!hook.start(hookPath())) {
@@ -1613,18 +2114,30 @@ function bootstrap(): void {
 
   ipcMain.on('wheel:select', (_event, sector: Sector) => finishSelection(sector))
   ipcMain.on('wheel:cancel', () => finishSelection('cancel'))
-  ipcMain.on('panel:close', () => {
-    for (const controller of activeChats.values()) controller.abort()
-    activeChats.clear()
-    panel?.hide()
+  ipcMain.on('panel:close', hidePanel)
+  ipcMain.on('panel:minimize', () => {
+    cancelTextDrag()
+    panel?.minimize()
   })
-  ipcMain.on('panel:minimize', () => panel?.minimize())
+  ipcMain.handle('panel:pin', (_event, pinned: boolean) => {
+    const updated = setAlwaysOnTopSetting(Boolean(pinned))
+    applyPanelPin(updated.alwaysOnTop)
+    return updated.alwaysOnTop
+  })
   ipcMain.on('clipboard:write', (_event, text: string) => {
     void clipboard.writeText(String(text))
   })
   ipcMain.on('panel:insert', (_event, text: string) => {
     void insertText(String(text))
   })
+  ipcMain.on('panel:drag-begin', (_event, text: string) => {
+    beginTextDrag(String(text ?? ''))
+  })
+  ipcMain.on('panel:drag-prepare', () => warmDragGhost())
+  ipcMain.on('panel:drag-cancel', () => {
+    cancelTextDrag()
+  })
+  ipcMain.handle('drag:text', () => dragGhostPending ?? '')
 
   ipcMain.handle('settings:get', () => getPublicSettings())
   ipcMain.handle('shortcuts:get', () => getShortcutInfo())
@@ -1730,12 +2243,18 @@ function bootstrap(): void {
   )
   ipcMain.handle('kb:add-files', async () => {
     if (!panel) return []
-    const result = await dialog.showOpenDialog(panel, {
-      properties: ['openFile', 'multiSelections'],
-      filters: [
-        { name: 'Text', extensions: ['txt', 'md', 'markdown', 'csv', 'json', 'log'] }
-      ]
-    })
+    dialogOpen = true
+    let result: Awaited<ReturnType<typeof dialog.showOpenDialog>>
+    try {
+      result = await dialog.showOpenDialog(panel, {
+        properties: ['openFile', 'multiSelections'],
+        filters: [
+          { name: 'Text', extensions: ['txt', 'md', 'markdown', 'csv', 'json', 'log'] }
+        ]
+      })
+    } finally {
+      dialogOpen = false
+    }
     if (result.canceled || result.filePaths.length === 0) return []
     setKbIngestSink((progress) => sendToPanel('kb:ingest', progress))
     try {
@@ -1755,6 +2274,21 @@ function bootstrap(): void {
   ipcMain.on('chat:cancel', (_event, sessionId: string) => {
     activeChats.get(sessionId)?.abort()
   })
+  ipcMain.on('bubble:toggle', togglePanelFromLauncher)
+  ipcMain.on('bubble:move', (_event, point: { x?: number; y?: number }) => {
+    if (!bubble) return
+    const x = Number(point?.x)
+    const y = Number(point?.y)
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return
+    const at = clampBubblePosition({ x, y })
+    bubble.setPosition(at.x, at.y, false)
+  })
+  ipcMain.on('bubble:place', () => {
+    if (!bubble) return
+    const bounds = bubble.getBounds()
+    setBubblePosition(bounds.x, bounds.y)
+  })
+  scheduleBubble()
   perf('bootstrap done')
 }
 
@@ -1768,12 +2302,17 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(bootstrap)
 
   app.on('before-quit', () => {
+    quitting = true
+    for (const controller of activeChats.values()) controller.abort()
+    activeChats.clear()
     hook.stop()
     globalShortcut.unregisterAll()
+    tray?.destroy()
+    tray = null
     closeStore()
   })
 
   app.on('window-all-closed', () => {
-    // Keep running; quitting will be owned by the tray/menu in a later milestone.
+    // Resident app: windows hide instead of closing; quit from the tray menu.
   })
 }
