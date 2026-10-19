@@ -16,7 +16,7 @@ const QUERY_PREFIX = '为这个句子生成表示以用于检索相关文章：'
 const CHUNK_SIZE = 700
 const CHUNK_OVERLAP = 120
 const BATCH_SIZE = 8
-const MAX_DISTANCE = 1.2
+const MAX_DISTANCE = 0.95
 const MIRRORS = ['https://hf-mirror.com', 'https://huggingface.co']
 
 type Extractor = (
@@ -300,7 +300,14 @@ export async function retrieveKb(query: string, limit = 5): Promise<KbSource[]> 
     if (!hasKbChunks()) return []
 
     const vector = await embedQuery(query)
-    return searchKb(vector, limit)
+    const hits = searchKb(vector, limit)
+    if (process.env.ROULETTE_PERF === '1') {
+      console.log(
+        '[kb] hits',
+        hits.map((hit) => `${hit.distance.toFixed(3)} ${hit.title}`).join(' | ')
+      )
+    }
+    return hits
       .filter((hit) => hit.distance < MAX_DISTANCE)
       .map((hit) => ({
         documentId: hit.documentId,

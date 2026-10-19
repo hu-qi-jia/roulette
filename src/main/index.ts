@@ -27,6 +27,11 @@ import {
   setKbProgressSink
 } from './kb'
 import { streamChat } from './engine'
+import {
+  buildWebContext,
+  searchWeb,
+  supportsHostWebSearch
+} from './websearch'
 import { getApiKey, getPublicSettings, saveSettings } from './settings'
 import {
   cloneShortcuts,
@@ -281,6 +286,23 @@ function toChatHistory(messages: StoredMessage[]): ChatMessage[] {
   return history
 }
 
+async function retrieveKbWithTimeout(query: string): Promise<KbSource[]> {
+  // Knowledge-base retrieval is optional context. Never let embedding/load
+  // latency hold up the model's own answer.
+  let timer: NodeJS.Timeout | null = null
+  const timeout = new Promise<KbSource[]>((resolve) => {
+    timer = setTimeout(() => {
+      console.warn('[kb] retrieval timed out; answering without it')
+      resolve([])
+    }, 1200)
+  })
+  try {
+    return await Promise.race([retrieveKb(query), timeout])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 async function handleChat(request: ChatRequest): Promise<void> {
   const settings = getPublicSettings()
   const apiKey = getApiKey()
@@ -332,26 +354,37 @@ async function handleChat(request: ChatRequest): Promise<void> {
   const history = toChatHistory(getMessages(request.sessionId))
 
   let sources: KbSource[] = []
-  if (settings.kbEnabled) {
-    // Knowledge-base retrieval is optional context. Never let embedding/load
-    // latency hold up the model's own answer.
-    let timer: NodeJS.Timeout | null = null
-    const timeout = new Promise<KbSource[]>((resolve) => {
-      timer = setTimeout(() => {
-        console.warn('[kb] retrieval timed out; answering without it')
-        resolve([])
-      }, 1200)
-    })
-    try {
-      sources = await Promise.race([retrieveKb(text), timeout])
-    } finally {
-      if (timer) clearTimeout(timer)
-    }
+  const hostWebSearch =
+    settings.webSearch && supportsHostWebSearch(settings.baseUrl)
+  // Start local retrieval in parallel, but if the web search finds results we
+  // do not wait for the knowledge base at all.
+  const kbPromise = settings.kbEnabled
+    ? retrieveKbWithTimeout(text)
+    : Promise.resolve([] as KbSource[])
+  const webResults = hostWebSearch
+    ? await searchWeb(settings.baseUrl, apiKey, text)
+    : []
+
+  let systemContext: string | undefined
+  if (webResults.length > 0) {
+    // Web results are current and already carry citable URLs. Do not mix in
+    // knowledge-base sources, whose [n] numbering would collide.
+    systemContext = buildWebContext(webResults, text)
+    sources = []
+    console.log('[web] retrieved', webResults.length, 'results for', request.sessionId)
+  } else {
+    sources = await kbPromise
     if (sources.length > 0) {
+      systemContext = buildKbContext(sources)
       console.log('[kb] retrieved', sources.length, 'chunks for', request.sessionId)
+    } else if (hostWebSearch) {
+      systemContext =
+        'A web search was attempted for the latest question but returned no usable results. Answer normally from your own knowledge and note that time-sensitive facts may be outdated.'
     }
   }
-  const systemContext = sources.length > 0 ? buildKbContext(sources) : undefined
+
+  // Non-DeepSeek providers use their own search capability, if any.
+  const modelWebSearch = settings.webSearch && !hostWebSearch
 
   activeChats.get(request.sessionId)?.abort()
   const controller = new AbortController()
@@ -381,7 +414,7 @@ async function handleChat(request: ChatRequest): Promise<void> {
         baseUrl: settings.baseUrl,
         apiKey,
         model,
-        webSearch: settings.webSearch,
+        webSearch: modelWebSearch,
         systemContext
       },
       history,

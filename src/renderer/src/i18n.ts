@@ -88,7 +88,7 @@ const resources = {
       visionModel: 'Vision model',
       webSearch: 'Web search',
       webSearchHint:
-        'The model searches the web when the provider supports it; otherwise it answers normally.',
+        'DeepSeek API searches the web automatically; other providers use the model’s built-in capability when available.',
       errNoKey: 'No API key configured. Open settings to add one.',
       errNoBaseUrl: 'Base URL is not configured. Open settings to add one.',
       errNoModel: 'No model configured. Open settings to choose one.',
@@ -220,7 +220,7 @@ const resources = {
       textModel: '文本模型',
       visionModel: '视觉模型',
       webSearch: '联网搜索',
-      webSearchHint: '由模型/服务商执行搜索；不支持时会正常回答。',
+      webSearchHint: 'DeepSeek 官方 API 会自动检索网页；其他服务商使用模型自带能力（如有）。',
       errNoKey: '还没有配置 API Key，打开设置添加一个。',
       errNoBaseUrl: '还没有配置 Base URL，打开设置添加一个。',
       errNoModel: '还没有配置模型，打开设置选择一个。',
