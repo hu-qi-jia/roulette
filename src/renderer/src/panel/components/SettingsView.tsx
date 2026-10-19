@@ -194,6 +194,17 @@ export function SettingsView({
               />
             </div>
           </div>
+
+          <div className="settings-row">
+            <span>{t('webSearch')}</span>
+            <span className="grow" />
+            <Toggle
+              checked={draft.webSearch}
+              label={t('webSearch')}
+              onChange={() => setDraft({ webSearch: !draft.webSearch })}
+            />
+          </div>
+          <div className="settings-note">{t('webSearchHint')}</div>
         </section>
 
         <section className="settings-block">

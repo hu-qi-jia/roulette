@@ -1051,6 +1051,13 @@ body[data-route='panel'] {
   flex: 1;
 }
 
+.settings-note {
+  margin: -4px 0 8px;
+  color: var(--muted);
+  font-size: var(--text-caption);
+  line-height: 1.4;
+}
+
 .settings-row kbd {
   flex: none;
   padding: 3px 7px;

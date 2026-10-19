@@ -86,6 +86,9 @@ const resources = {
       notAvailable: 'Not available',
       textModel: 'Text model',
       visionModel: 'Vision model',
+      webSearch: 'Web search',
+      webSearchHint:
+        'The model searches the web when the provider supports it; otherwise it answers normally.',
       errNoKey: 'No API key configured. Open settings to add one.',
       errNoBaseUrl: 'Base URL is not configured. Open settings to add one.',
       errNoModel: 'No model configured. Open settings to choose one.',
@@ -216,6 +219,8 @@ const resources = {
       notAvailable: '不可用',
       textModel: '文本模型',
       visionModel: '视觉模型',
+      webSearch: '联网搜索',
+      webSearchHint: '由模型/服务商执行搜索；不支持时会正常回答。',
       errNoKey: '还没有配置 API Key，打开设置添加一个。',
       errNoBaseUrl: '还没有配置 Base URL，打开设置添加一个。',
       errNoModel: '还没有配置模型，打开设置选择一个。',

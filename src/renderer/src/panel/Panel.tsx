@@ -544,6 +544,7 @@ export default function Panel(): React.JSX.Element {
       hasApiKey: false,
       asrAutoSend: false,
       kbEnabled: true,
+      webSearch: false,
       shortcuts: cloneShortcuts(DEFAULT_SHORTCUTS)
     }
     settingsDraft.populate(config)

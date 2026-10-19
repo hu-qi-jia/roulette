@@ -15,6 +15,7 @@ export interface SettingsDraft {
   visionModel: string
   asrAutoSend: boolean
   kbEnabled: boolean
+  webSearch: boolean
   shortcuts: ShortcutSettings
   showApiKey: boolean
 }
@@ -43,6 +44,7 @@ export function useSettingsDraft({
     visionModel: '',
     asrAutoSend: false,
     kbEnabled: true,
+    webSearch: false,
     shortcuts: cloneShortcuts(DEFAULT_SHORTCUTS),
     showApiKey: false
   })
@@ -60,6 +62,7 @@ export function useSettingsDraft({
       visionModel: settings.visionModel || settings.textModel,
       asrAutoSend: settings.asrAutoSend,
       kbEnabled: settings.kbEnabled,
+      webSearch: settings.webSearch,
       shortcuts: cloneShortcuts(settings.shortcuts),
       showApiKey: false
     })
@@ -87,6 +90,7 @@ export function useSettingsDraft({
       visionModel: draft.visionModel.trim(),
       asrAutoSend: draft.asrAutoSend,
       kbEnabled: draft.kbEnabled,
+      webSearch: draft.webSearch,
       shortcuts: cloneShortcuts(draft.shortcuts)
     }
     // Only touch the stored key when the field was edited, so a quick save

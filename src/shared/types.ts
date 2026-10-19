@@ -118,6 +118,7 @@ export interface AppSettings {
   hasApiKey: boolean
   asrAutoSend: boolean
   kbEnabled: boolean
+  webSearch: boolean
   shortcuts: ShortcutSettings
 }
 
@@ -128,6 +129,7 @@ export interface SettingsInput {
   apiKey?: string
   asrAutoSend?: boolean
   kbEnabled?: boolean
+  webSearch?: boolean
   shortcuts?: ShortcutSettings
 }
 

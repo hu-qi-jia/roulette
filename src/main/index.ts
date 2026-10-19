@@ -333,7 +333,20 @@ async function handleChat(request: ChatRequest): Promise<void> {
 
   let sources: KbSource[] = []
   if (settings.kbEnabled) {
-    sources = await retrieveKb(text)
+    // Knowledge-base retrieval is optional context. Never let embedding/load
+    // latency hold up the model's own answer.
+    let timer: NodeJS.Timeout | null = null
+    const timeout = new Promise<KbSource[]>((resolve) => {
+      timer = setTimeout(() => {
+        console.warn('[kb] retrieval timed out; answering without it')
+        resolve([])
+      }, 1200)
+    })
+    try {
+      sources = await Promise.race([retrieveKb(text), timeout])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
     if (sources.length > 0) {
       console.log('[kb] retrieved', sources.length, 'chunks for', request.sessionId)
     }
@@ -364,7 +377,13 @@ async function handleChat(request: ChatRequest): Promise<void> {
   try {
     console.log('[chat] start', request.sessionId, 'turns:', history.length, 'model:', model)
     for await (const delta of streamChat(
-      { baseUrl: settings.baseUrl, apiKey, model, systemContext },
+      {
+        baseUrl: settings.baseUrl,
+        apiKey,
+        model,
+        webSearch: settings.webSearch,
+        systemContext
+      },
       history,
       controller.signal
     )) {
@@ -427,7 +446,7 @@ function buildKbContext(sources: KbSource[]): string {
   const lines = sources.map(
     (source, index) => `[${index + 1}] ${source.title}\n${source.snippet}`
   )
-  return `The passages below come from the user's local knowledge base. They are reference material, not the answer. Answer the user's question directly and concisely by synthesizing the relevant information in your own words. Do not copy, list, or restate the passages wholesale, and do not include unrelated background. Cite supporting passages as [1], [2], etc. If the passages do not contain the answer, say so.\n\n${lines.join('\n\n')}`
+  return `The passages below are optional reference material from the user's local knowledge base. Use them only when they are relevant to the question. If they are unrelated, incomplete, or do not help, ignore them completely and answer normally from your own knowledge; do not mention the knowledge base or any missing information. Do not copy passages wholesale. When you use a passage, cite it as [1], [2], etc.\n\n${lines.join('\n\n')}`
 }
 
 // Electron 44's async clipboard API refuses to write ClipboardItems returned by

@@ -14,6 +14,7 @@ interface StoredSettings {
   visionModel: string
   asrAutoSend: boolean
   kbEnabled: boolean
+  webSearch: boolean
   shortcuts: ShortcutSettings
   apiKeyEnc?: string
 }
@@ -24,6 +25,7 @@ const EMPTY: StoredSettings = {
   visionModel: '',
   asrAutoSend: false,
   kbEnabled: true,
+  webSearch: false,
   shortcuts: cloneShortcuts(DEFAULT_SHORTCUTS)
 }
 
@@ -40,6 +42,7 @@ function loadStored(): StoredSettings {
       visionModel: typeof parsed.visionModel === 'string' ? parsed.visionModel : '',
       asrAutoSend: parsed.asrAutoSend === true,
       kbEnabled: parsed.kbEnabled !== false,
+      webSearch: parsed.webSearch === true,
       shortcuts: normalizeShortcuts(parsed.shortcuts) ?? cloneShortcuts(DEFAULT_SHORTCUTS),
       apiKeyEnc: typeof parsed.apiKeyEnc === 'string' ? parsed.apiKeyEnc : undefined
     }
@@ -71,6 +74,7 @@ export function getPublicSettings(): AppSettings {
     hasApiKey: Boolean(envKey || stored.apiKeyEnc),
     asrAutoSend: stored.asrAutoSend,
     kbEnabled: stored.kbEnabled,
+    webSearch: stored.webSearch,
     shortcuts: cloneShortcuts(stored.shortcuts)
   }
 }
@@ -100,6 +104,9 @@ export function saveSettings(input: SettingsInput): AppSettings {
   }
   if (typeof input.kbEnabled === 'boolean') {
     stored.kbEnabled = input.kbEnabled
+  }
+  if (typeof input.webSearch === 'boolean') {
+    stored.webSearch = input.webSearch
   }
   if (input.shortcuts) {
     const normalized = normalizeShortcuts(input.shortcuts)
